@@ -24,43 +24,37 @@ processing_times = []  # لتتبع أداء المهام
 start_time = None  # وقت بدء التشغيل
 
 async def collect_files(client, channel_id, first_msg_id):
-    """إصدار محسن لجمع الملفات مع تتبع الأداء"""
+    """إصدار محسن لجمع الملفات مع تتبع الأداء، يعتمد على حجم الملف فقط"""
     global processing_times
     file_dict = {}
     
     start_collect = time.time()
     
-    # معالجة غير متزامنة بمهام مجمعة
     async def process_message(message):
+        # التأكد من أن الرسالة تحتوي على ملف وأن له حجم
         if message.file and hasattr(message.file, 'size'):
             file_size = message.file.size
-            # استخدام معرف الملف الفريد (file_id.unique_id) لضمان الدقة في التكرار
-            # في حال وجود ملفات مختلفة بالحجم ولكن بمحتوى مختلف (نادر، لكن أكثر دقة)
-            if message.file.size and message.file.md5_checksum: # استخدام md5_checksum أو file_id.unique_id
-                file_unique_id = f"{message.file.size}_{message.file.md5_checksum}"
-            elif message.file.id: # fallback if no checksum (e.g., photos without explicit checksum)
-                file_unique_id = f"{message.file.size}_{message.file.id}"
-            else: # last resort, use only size (less accurate for true duplicates)
-                file_unique_id = str(message.file.size)
-
             async with lock:  # منع التنافس على الموارد
-                if file_unique_id in file_dict:
-                    file_dict[file_unique_id].append(message.id)
+                if file_size in file_dict:
+                    file_dict[file_size].append(message.id)
                 else:
-                    file_dict[file_unique_id] = [message.id]
+                    file_dict[file_size] = [message.id]
     
     # إنشاء وتشغيل المهام بشكل متوازي
     tasks = []
     lock = asyncio.Lock()
     print("جاري مسح الرسائل في القناة...")
+    messages_scanned = 0
     async for message in client.iter_messages(channel_id, min_id=first_msg_id):
         tasks.append(process_message(message))
-        if len(tasks) % 500 == 0:  # معالجة كل 500 رسالة دفعة واحدة
-            print(f"تم مسح {len(tasks)} رسالة حتى الآن...")
-            await asyncio.gather(*tasks)
-            tasks = []
-    
-    if tasks:  # معالجة المتبقي
+        messages_scanned += 1
+        if messages_scanned % 500 == 0:  # طباعة التقدم كل 500 رسالة
+            print(f"تم مسح {messages_scanned} رسالة حتى الآن...")
+            await asyncio.gather(*tasks) # تنفيذ المهام المتراكمة
+            tasks = [] # إعادة تعيين قائمة المهام
+
+    # معالجة أي مهام متبقية بعد انتهاء الحلقة
+    if tasks:
         await asyncio.gather(*tasks)
     
     processing_time = time.time() - start_collect
@@ -86,7 +80,7 @@ async def send_duplicate_links_report(client, source_chat_id, destination_chat_i
     total_reported_duplicates += 1
     total_duplicate_messages += len(duplicate_msg_ids)
     
-    report_message = f"📌 **تم العثور على ملفات مكررة!**\n\n"
+    report_message = f"📌 **تم العثور على ملفات مكررة (حسب الحجم)!**\n\n"
     report_message += f"🔗 **الرسالة الأصلية:** `https://t.me/c/{str(source_chat_id)[4:]}/{original_msg_id}`\n\n"
     report_message += "**النسخ المكررة:**\n"
 
@@ -145,23 +139,17 @@ async def find_and_report_duplicates(client, channel_id):
     global start_time
     start_time = time.time()
     
-    print("🔍 بدأ تحليل الملفات في القناة...")
+    print("🔍 بدأ تحليل الملفات في القناة (اعتمادًا على حجم الملف فقط)...")
     file_dict = await collect_files(client, channel_id, FIRST_MSG_ID)
     
     print("⚡ بدأ إعداد تقارير الروابط للملفات المكررة...")
     
-    # قائمة لتخزين المهام
     tasks = []
     
-    for file_unique_id, msg_ids in file_dict.items():
-        if len(msg_ids) > 1:  # إذا كان هناك أكثر من رسالة بنفس المعرف الفريد للملف (مكررة)
-            # إضافة مهمة إرسال التقرير
+    for file_size, msg_ids in file_dict.items():
+        if len(msg_ids) > 1:  # إذا كان هناك أكثر من رسالة بنفس الحجم
             tasks.append(send_duplicate_links_report(client, channel_id, CHANNEL_ID_LOG, msg_ids))
     
-    # تشغيل جميع مهام إرسال التقارير بالتتابع (بسبب الـ sleep داخل الدالة)
-    # ملاحظة: asyncio.gather سيحاول تشغيلها بالتوازي، لكن الـ sleep داخل send_duplicate_links_report
-    # سيؤخر العملية. إذا أردت التأكد من التتابع، يمكن استخدام for loop عادي
-    # ولكن asyncio.gather لا يزال يحسن الأداء في بعض الجوانب.
     print(f"سيتم إرسال تقارير لـ {len(tasks)} مجموعة من التكرارات.")
     for task in tasks:
         await task # تشغيل المهام واحدة تلو الأخرى لضمان التأخير
