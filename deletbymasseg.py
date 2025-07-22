@@ -165,10 +165,16 @@ async def find_and_report_duplicates(client, channel_id):
     print(f"🏁 اكتملت العملية في {time.time()-start_time:.2f} ثانية.")
 
 async def main():
-    async with Client("my_account_session", api_id=API_ID, api_hash=API_HASH, session_string=SESSION) as client:
+    # << تعديل هنا: تجاهل SESSION من .env مؤقتاً >>
+    # نقوم بتمرير None لـ session_string إذا كان متغير البيئة فارغاً
+    # هذا سيجبر Pyrogram على إنشاء ملف .session جديد إذا لم يكن موجودًا
+    session_from_env = os.getenv('SESSION')
+
+    # قمنا بتغيير اسم ملف الجلسة لتمييزه
+    async with Client("new_pyrogram_session", api_id=API_ID, api_hash=API_HASH, session_string=session_from_env) as client:
         print("🚀 اتصال ناجح بالتيليجرام عبر Pyrogram.")
         
-        # << تعديل هنا: التأكد من أن العميل "يعرف" القنوات قبل استخدامها >>
+        # << الكود التالي سيعمل بشكل صحيح مع الجلسة الجديدة >>
         try:
             print(f"التحقق من الوصول إلى القناة المصدر: {CHANNEL_ID}")
             await client.get_chat(CHANNEL_ID)
@@ -178,7 +184,7 @@ async def main():
         except Exception as e:
             print(f"❌ خطأ فادح: لا يمكن الوصول إلى إحدى القنوات. تأكد من أن الحساب عضو فيها وأن المُعرّف صحيح.")
             print(f"تفاصيل الخطأ: {e}")
-            return # الخروج من البرنامج إذا لم نتمكن من الوصول للقناة
+            return
 
         await find_and_report_duplicates(client, CHANNEL_ID)
 
