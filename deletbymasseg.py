@@ -13,20 +13,21 @@ load_dotenv()
 # إعدادات تيليجرام
 API_ID = int(os.getenv('API_ID', 0))
 API_HASH = os.getenv('API_HASH')
-# ملاحظة: سيتم تجاهل SESSION من .env إذا كان الكود يستخدم ملف جلسة محلي
 SESSION = os.getenv('SESSION') 
 CHANNEL_ID = int(os.getenv('CHANNEL_ID', 0))
 CHANNEL_ID_LOG = int(os.getenv('CHANNEL_ID_LOG', 0))
 FIRST_MSG_ID = int(os.getenv('FIRST_MSG_ID', 0))
 
-# ... (كل الدوال السابقة تبقى كما هي تمامًا) ...
-# دالة collect_files
-# دالة send_duplicate_links_report
-# دالة send_statistics
-# دالة find_and_report_duplicates
+# إحصائيات وأداء (تعريف المتغيرات العامة)
+total_reported_duplicates = 0
+total_duplicate_messages = 0
+processing_times = []
+start_time = None
+
+# ----------------- الدوال -----------------
 
 async def collect_files(client, channel_id, first_msg_id):
-    global processing_times
+    global processing_times # التصريح باستخدام المتغير العام
     file_dict = {}
     start_collect = time.time()
     
@@ -57,7 +58,7 @@ async def collect_files(client, channel_id, first_msg_id):
     return file_dict
 
 async def send_duplicate_links_report(client, source_chat_id, destination_chat_id, message_ids):
-    global total_reported_duplicates, total_duplicate_messages
+    global total_reported_duplicates, total_duplicate_messages # استخدام المتغيرات العامة
     if not message_ids: return
     message_ids.sort()
     original_msg_id, duplicate_msg_ids = message_ids[0], message_ids[1:]
@@ -89,7 +90,7 @@ async def send_duplicate_links_report(client, source_chat_id, destination_chat_i
     await asyncio.sleep(5)
 
 async def send_statistics(client):
-    global total_reported_duplicates, total_duplicate_messages, start_time
+    global total_reported_duplicates, total_duplicate_messages, start_time # استخدام المتغيرات العامة
     total_time = time.time() - start_time
     avg_time = sum(t[1] for t in processing_times) / len(processing_times) if processing_times else 0
     slowest_tasks = sorted(processing_times, key=lambda x: x[1], reverse=True)[:3]
@@ -108,7 +109,7 @@ async def send_statistics(client):
     except Exception as e: print(f"⚠️ خطأ أثناء إرسال التقرير النهائي: {e}")
 
 async def find_and_report_duplicates(client, channel_id):
-    global start_time
+    global start_time # استخدام المتغير العام
     start_time = time.time()
     print("🔍 بدأ تحليل الملفات في القناة (اعتمادًا على حجم الملف فقط)...")
     file_dict = await collect_files(client, channel_id, FIRST_MSG_ID)
@@ -119,32 +120,23 @@ async def find_and_report_duplicates(client, channel_id):
     await send_statistics(client)
     print(f"🏁 اكتملت العملية في {time.time()-start_time:.2f} ثانية.")
 
+# ----------------- الدالة الرئيسية -----------------
+
 async def main():
-    # سيستخدم ملف "new_pyrogram_session.session" الذي تم إنشاؤه
+    # اسم الجلسة يجب أن يكون هو نفسه الذي سجلت به الدخول سابقًا
     async with Client("new_pyrogram_session", api_id=API_ID, api_hash=API_HASH) as client:
         print("🚀 اتصال ناجح بالتيليجرام عبر Pyrogram.")
         
-        # << تعديل جوهري هنا: إجبار Pyrogram على تحديث قائمة المحادثات >>
-        print("💡 جارٍ تحديث ذاكرة التخزين المؤقت للجلسة (قد يستغرق بعض الوقت)...")
+        # لا حاجة لتسخين الذاكرة المؤقتة في كل مرة إذا كانت الجلسة موجودة
+        # ولكن إبقاؤها لا يضر
+        print("💡 جارٍ التحقق من الوصول إلى القنوات...")
         try:
-            async for dialog in client.get_dialogs():
-                pass # نحن فقط نمر على المحادثات لتعبئة الذاكرة المؤقتة
-            print("✅ تم تحديث ذاكرة التخزين المؤقت للجلسة بنجاح.")
-        except Exception as e:
-            print(f"⚠️ حدث خطأ أثناء تحديث قائمة المحادثات: {e}")
-            # قد لا نزال نحاول المتابعة
-        
-        # الآن، يجب أن يعمل التحقق التالي بنجاح
-        try:
-            print(f"التحقق من الوصول إلى القناة المصدر: {CHANNEL_ID}")
             await client.get_chat(CHANNEL_ID)
-            print(f"التحقق من الوصول إلى قناة السجل: {CHANNEL_ID_LOG}")
             await client.get_chat(CHANNEL_ID_LOG)
             print("✅ تم التحقق من الوصول إلى القنوات بنجاح.")
         except Exception as e:
-            print(f"❌ خطأ فادح حتى بعد تحديث الجلسة: لا يمكن الوصول إلى إحدى القنوات.")
-            print(f"   الرجاء التأكد 100% من أن المُعرّف '{CHANNEL_ID}' صحيح تمامًا ولم يتم نسخه بالخطأ.")
-            print(f"   تفاصيل الخطأ: {e}")
+            print(f"❌ خطأ فادح: لا يمكن الوصول إلى إحدى القنوات.")
+            print(f"تفاصيل الخطأ: {e}")
             return
 
         await find_and_report_duplicates(client, CHANNEL_ID)
