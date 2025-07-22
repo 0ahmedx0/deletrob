@@ -10,8 +10,8 @@ API_ID = int(os.getenv('API_ID', 0))
 API_HASH = os.getenv('API_HASH')
 BOT_TOKEN = os.getenv('BOT_TOKEN') # 🚨🚨🚨 قراءة توكن البوت 🚨🚨🚨
 
-CHANNEL_ID = int(os.getenv('CHANNEL_ID', 0))
-CHANNEL_ID_LOG = int(os.getenv('CHANNEL_ID_LOG', 0))
+CHANNEL_ID = (os.getenv('CHANNEL_ID', 0))
+CHANNEL_ID_LOG = (os.getenv('CHANNEL_ID_LOG', 0))
 FIRST_MSG_ID = int(os.getenv('FIRST_MSG_ID', 0))
 LAST_MSG_ID = int(os.getenv('LAST_MSG_ID', 0))
 
