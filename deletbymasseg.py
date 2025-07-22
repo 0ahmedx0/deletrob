@@ -1,4 +1,3 @@
-اجعل الكود هذا يعمل ب فرست مسج و نهايه رقم الرساله المحدده من قبل المستخدم 
 
 from telethon import TelegramClient
 from telethon.sessions import StringSession
