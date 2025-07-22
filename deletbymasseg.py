@@ -1,92 +1,94 @@
-# --- الكود الرئيسي (مجددًا Telethon مع Bot Token) ---
-import os
-import asyncio
-import time
-from telethon import TelegramClient
-from telethon.tl.types import Message
-from telethon.errors import FloodWaitError
+اجعل الكود هذا يعمل ب فرست مسج و نهايه رقم الرساله المحدده من قبل المستخدم 
 
-# 1. إعدادات تيليجرام - قراءة المتغيرات مباشرة من البيئة
+from telethon import TelegramClient
+from telethon.sessions import StringSession
+from telethon.errors import FloodWaitError
+from dotenv import load_dotenv
+import asyncio
+import os
+import time
+
+# تحميل إعدادات البيئة
+load_dotenv()
+
+# إعدادات تيليجرام
 API_ID = int(os.getenv('API_ID', 0))
 API_HASH = os.getenv('API_HASH')
-BOT_TOKEN = os.getenv('BOT_TOKEN') 
+SESSION = os.getenv('SESSION')  
+CHANNEL_ID = (os.getenv('CHANNEL_ID', 0))  
+CHANNEL_ID_LOG = (os.getenv('CHANNEL_ID_LOG', 0))  
+FIRST_MSG_ID = int(os.getenv('FIRST_MSG_ID', 0))  
 
-CHANNEL_ID = os.getenv('CHANNEL_ID') 
-CHANNEL_ID_LOG = (os.getenv('CHANNEL_ID_LOG', 0)) 
-FIRST_MSG_ID = int(os.getenv('FIRST_MSG_ID', 0))
-LAST_MSG_ID = int(os.getenv('LAST_MSG_ID', 0))
+# إحصائيات وأداء
+total_reported_duplicates = 0 # عدد مجموعات التكرارات التي تم الإبلاغ عنها
+total_duplicate_messages = 0 # إجمالي عدد الرسائل المكررة التي تم العثور عليها (غير الأصلية)
+processing_times = []  # لتتبع أداء المهام
+start_time = None  # وقت بدء التشغيل
 
-if not all([API_ID, API_HASH, BOT_TOKEN, CHANNEL_ID, CHANNEL_ID_LOG, FIRST_MSG_ID, LAST_MSG_ID]):
-    print("❌ خطأ: بعض المتغيرات البيئية الأساسية غير موجودة أو فارغة.")
-    print(f"تحقق من API_ID={API_ID}, API_HASH={API_HASH}, BOT_TOKEN={BOT_TOKEN is not None}, CHANNEL_ID={CHANNEL_ID}, CHANNEL_ID_LOG={CHANNEL_ID_LOG}, FIRST_MSG_ID={FIRST_MSG_ID}, LAST_MSG_ID={LAST_MSG_ID}")
-    exit(1)
-
-# 2. إحصائيات وأداء (لا يوجد تغيير)
-total_reported_duplicates = 0
-total_duplicate_messages = 0
-processing_times = []
-start_time = None
-
-# باقي الدوال (collect_files, send_duplicate_links_report, send_statistics, find_and_report_duplicates)
-# تبقى كما هي بالضبط.
-
-async def collect_files(client, channel_id, first_msg_id, last_msg_id):
-    """إصدار محسّن لجمع الملفات يعتمد على حجم الملف، ضمن نطاق IDs محدد."""
+async def collect_files(client, channel_id, first_msg_id):
+    """إصدار محسن لجمع الملفات مع تتبع الأداء، يعتمد على حجم الملف فقط"""
     global processing_times
     file_dict = {}
     
     start_collect = time.time()
     
-    lock = asyncio.Lock()
-
-    print(f"جاري مسح الرسائل في القناة ID: {channel_id} من الرسالة {first_msg_id} إلى {last_msg_id}...")
-    messages_scanned = 0
-    
-    async for message in client.iter_messages(channel_id, min_id=first_msg_id, max_id=last_msg_id + 1):
-        messages_scanned += 1
-        
+    async def process_message(message):
+        # التأكد من أن الرسالة تحتوي على ملف وأن له حجم
         if message.file and hasattr(message.file, 'size'):
             file_size = message.file.size
-            async with lock:
+            async with lock:  # منع التنافس على الموارد
                 if file_size in file_dict:
                     file_dict[file_size].append(message.id)
                 else:
                     file_dict[file_size] = [message.id]
-        
-        if messages_scanned % 500 == 0:
-            print(f"تم مسح {messages_scanned} رسالة حتى الآن... (أحدث رسالة تم مسحها: {message.id})")
+    
+    # إنشاء وتشغيل المهام بشكل متوازي
+    tasks = []
+    lock = asyncio.Lock()
+    print("جاري مسح الرسائل في القناة...")
+    messages_scanned = 0
+    async for message in client.iter_messages(channel_id, min_id=first_msg_id):
+        tasks.append(process_message(message))
+        messages_scanned += 1
+        if messages_scanned % 500 == 0:  # طباعة التقدم كل 500 رسالة
+            print(f"تم مسح {messages_scanned} رسالة حتى الآن...")
+            await asyncio.gather(*tasks) # تنفيذ المهام المتراكمة
+            tasks = [] # إعادة تعيين قائمة المهام
 
+    # معالجة أي مهام متبقية بعد انتهاء الحلقة
+    if tasks:
+        await asyncio.gather(*tasks)
+    
     processing_time = time.time() - start_collect
     processing_times.append(('collect_files', processing_time))
-    print(f"تم الانتهاء من مسح الرسائل. تم جمع {len(file_dict)} إدخال حجم ملف.")
     return file_dict
 
 async def send_duplicate_links_report(client, source_chat_id, destination_chat_id, message_ids):
+    """
+    يرسل تقريراً بروابط الرسائل المكررة إلى قناة السجل، مع تأخير زمني.
+    """
     global total_reported_duplicates, total_duplicate_messages
     
-    if not message_ids or len(message_ids) < 2:
+    if not message_ids:
         return
 
     original_msg_id = message_ids[0]
-    duplicate_msg_ids = message_ids[1:]
+    duplicate_msg_ids = message_ids[1:] # الرسائل المكررة هي كل ما عدا الأولى
 
-    try:
-        chat_entity = await client.get_entity(source_chat_id)
-        clean_source_chat_id = str(chat_entity.id)
-        if clean_source_chat_id.startswith('-100'):
-            clean_source_chat_id = clean_source_chat_id[4:]
-    except Exception:
-        clean_source_chat_id = str(source_chat_id).replace('-100', '')
+    # إذا لم يكن هناك تكرارات حقيقية (فقط الرسالة الأصلية)، فلا نرسل تقريراً
+    if not duplicate_msg_ids:
+        return
 
     total_reported_duplicates += 1
     total_duplicate_messages += len(duplicate_msg_ids)
     
     report_message = f"📌 **تم العثور على ملفات مكررة (حسب الحجم)!**\n\n"
-    report_message += f"🔗 **الرسالة الأصلية:** `https://t.me/c/{clean_source_chat_id}/{original_msg_id}`\n\n"
+    report_message += f"🔗 **الرسالة الأصلية:** `https://t.me/c/{str(source_chat_id)[4:]}/{original_msg_id}`\n\n"
     report_message += "**النسخ المكررة:**\n"
 
+    # بناء روابط النسخ المكررة
     for msg_id in duplicate_msg_ids:
-        report_message += f"- `https://t.me/c/{clean_source_chat_id}/{msg_id}`\n"
+        report_message += f"- `https://t.me/c/{str(source_chat_id)[4:]}/{msg_id}`\n"
     
     try:
         start_send = time.time()
@@ -95,15 +97,14 @@ async def send_duplicate_links_report(client, source_chat_id, destination_chat_i
     except FloodWaitError as e:
         print(f"⏳ (تقرير الروابط) انتظر {e.seconds} ثانية...")
         await asyncio.sleep(e.seconds + 1)
-        try:
-            await client.send_message(destination_chat_id, report_message)
-        except Exception as retry_e:
-            print(f"⚠️ فشل إرسال تقرير الروابط بعد الانتظار: {retry_e}")
+        # محاولة الإرسال مرة أخرى بعد الانتظار
+        await client.send_message(destination_chat_id, report_message)
     except Exception as e:
         print(f"⚠️ خطأ أثناء إرسال تقرير الروابط: {e}")
     
     processing_times.append(('send_duplicate_links_report', time.time() - start_send))
     
+    # تأخير 5 ثواني بعد كل رسالة تقرير
     await asyncio.sleep(5)
 
 
@@ -112,16 +113,9 @@ async def send_statistics(client):
     global total_reported_duplicates, total_duplicate_messages, start_time
     
     total_time = time.time() - start_time
+    # Avoid ZeroDivisionError if processing_times is empty
     avg_time = sum(t[1] for t in processing_times) / len(processing_times) if processing_times else 0
     
-    slowest_tasks_str = ""
-    if processing_times:
-        sorted_times = sorted(processing_times, key=lambda x: x[1], reverse=True)
-        for name, duration in sorted_times[:3]:
-            slowest_tasks_str += f"- {name}: {duration:.2f} ثانية\n"
-    else:
-        slowest_tasks_str = "لا توجد مهام مسجلة."
-
     report = f"""
     📊 **تقرير الأداء النهائي** 📊
     ----------------------------
@@ -130,7 +124,7 @@ async def send_statistics(client):
     • الوقت الكلي للعملية: {total_time:.2f} ثانية ⏱
     • متوسط وقت المهمة: {avg_time:.2f} ثانية ⚡
     • المهام الأبطأ: 
-    {slowest_tasks_str}
+    {sorted(processing_times, key=lambda x: x[1], reverse=True)[:3]}
     """
     
     try:
@@ -139,10 +133,7 @@ async def send_statistics(client):
     except FloodWaitError as e:
         print(f"⏳ (تقرير نهائي) انتظر {e.seconds} ثانية...")
         await asyncio.sleep(e.seconds + 1)
-        try:
-            await client.send_message(CHANNEL_ID_LOG, report)
-        except Exception as retry_e:
-            print(f"⚠️ فشل إرسال التقرير النهائي بعد الانتظار: {retry_e}")
+        await client.send_message(CHANNEL_ID_LOG, report)
     except Exception as e:
         print(f"⚠️ خطأ أثناء إرسال التقرير النهائي: {e}")
 
@@ -151,46 +142,28 @@ async def find_and_report_duplicates(client, channel_id):
     start_time = time.time()
     
     print("🔍 بدأ تحليل الملفات في القناة (اعتمادًا على حجم الملف فقط)...")
-    file_dict = await collect_files(client, channel_id, FIRST_MSG_ID, LAST_MSG_ID)
+    file_dict = await collect_files(client, channel_id, FIRST_MSG_ID)
     
-    print(f"⚡ بدأ إعداد تقارير الروابط للملفات المكررة. تم العثور على {len(file_dict)} ملفًا فريدًا حسب الحجم.")
+    print("⚡ بدأ إعداد تقارير الروابط للملفات المكررة...")
     
-    report_tasks = []
+    tasks = []
     
     for file_size, msg_ids in file_dict.items():
-        if len(msg_ids) > 1:
-            report_tasks.append(send_duplicate_links_report(client, channel_id, CHANNEL_ID_LOG, msg_ids))
+        if len(msg_ids) > 1:  # إذا كان هناك أكثر من رسالة بنفس الحجم
+            tasks.append(send_duplicate_links_report(client, channel_id, CHANNEL_ID_LOG, msg_ids))
     
-    print(f"سيتم إرسال تقارير لـ {len(report_tasks)} مجموعة من التكرارات.")
-    
-    for task in report_tasks:
-        await task
+    print(f"سيتم إرسال تقارير لـ {len(tasks)} مجموعة من التكرارات.")
+    for task in tasks:
+        await task # تشغيل المهام واحدة تلو الأخرى لضمان التأخير
     
     await send_statistics(client)
     print(f"🏁 اكتملت العملية في {time.time()-start_time:.2f} ثانية.")
 
 async def main():
-    # 🚨🚨🚨 هذا هو التغيير الرئيسي في دالة main 🚨🚨🚨
-    client = TelegramClient("bot_session", API_ID, API_HASH) # أنشئ الكائن
-    await client.start(bot_token=BOT_TOKEN) # ابدأ الكائن بشكل منفصل
-    
-    # الآن استخدم async with مع الكائن الذي تم إنشاؤه وبدأ تشغيله
-    async with client: # هنا يمكنك استخدام async with
-        print("🚀 اتصال ناجح بالتيليجرام باستخدام Telethon مع Bot Token.")
-        me = await client.get_me()
-        print(f"متصل كـ: {me.first_name} (@{me.username})")
+    async with TelegramClient(StringSession(SESSION), API_ID, API_HASH) as client:
+        print("🚀 اتصال ناجح بالتيليجرام.")
         await find_and_report_duplicates(client, CHANNEL_ID)
 
 if __name__ == '__main__':
     print("🔹 بدء التشغيل...")
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-    
-    if loop and loop.is_running():
-        print("💡 تم اكتشاف حلقة أحداث قائمة، تشغيل main كـ asyncio.create_task.")
-        asyncio.create_task(main())
-    else:
-        asyncio.run(main())
-    # --- نهاية الكود الرئيسي للبوت أو السكربت ---
+    asyncio.run(main())
