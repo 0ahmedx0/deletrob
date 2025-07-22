@@ -2,28 +2,24 @@
 import os
 import asyncio
 import time
-from telethon import TelegramClient
-from telethon.sessions import StringSession
-from telethon.errors import FloodWaitError
-
-# لا نستخدم load_dotenv() هنا، لأننا سنقوم بتعيين المتغيرات مباشرة في بيئة Colab.
+from pyrogram import Client
+from pyrogram.errors import FloodWait # ملاحظة: تختلف هنا
+# من Pyrogram لا نحتاج إلى StringSession، Client يتعامل مع الجلسات مباشرة
 
 # 1. إعدادات تيليجرام - قراءة المتغيرات مباشرة من البيئة
-# استخدم int() للتحويل إلى أعداد صحيحة إذا كانت المتغيرات تمثل IDs رقمية.
-# استخدم os.getenv() بدلاً من os.environ[] لتجنب الأخطاء إذا كان المتغير غير موجود.
-API_ID = int(os.getenv('API_ID', 0)) # قيمة افتراضية 0 إذا لم يتم العثور
+API_ID = int(os.getenv('API_ID', 0))
 API_HASH = os.getenv('API_HASH')
-SESSION = os.getenv('TELETHON_SESSION_STRING') # غيّرت الاسم ليكون أكثر وضوحًا
+PYRO_SESSION_STRING = os.getenv('PYRO_SESSION_STRING') # هذا هو متغير جلستك الصحيح الآن
 CHANNEL_ID = int(os.getenv('CHANNEL_ID', 0))
 CHANNEL_ID_LOG = int(os.getenv('CHANNEL_ID_LOG', 0))
 FIRST_MSG_ID = int(os.getenv('FIRST_MSG_ID', 0))
 LAST_MSG_ID = int(os.getenv('LAST_MSG_ID', 0))
 
 # للتحقق من أن المتغيرات الأساسية قد تم تحميلها
-if not all([API_ID, API_HASH, SESSION, CHANNEL_ID, CHANNEL_ID_LOG, FIRST_MSG_ID, LAST_MSG_ID]):
+if not all([API_ID, API_HASH, PYRO_SESSION_STRING, CHANNEL_ID, CHANNEL_ID_LOG, FIRST_MSG_ID, LAST_MSG_ID]):
     print("❌ خطأ: بعض المتغيرات البيئية الأساسية غير موجودة أو فارغة.")
-    print(f"تحقق من API_ID={API_ID}, API_HASH={API_HASH}, SESSION={SESSION is not None}, CHANNEL_ID={CHANNEL_ID}, CHANNEL_ID_LOG={CHANNEL_ID_LOG}, FIRST_MSG_ID={FIRST_MSG_ID}, LAST_MSG_ID={LAST_MSG_ID}")
-    exit(1) # إنهاء السكربت إذا كانت المتغيرات ناقصة
+    print(f"تحقق من API_ID={API_ID}, API_HASH={API_HASH}, PYRO_SESSION_STRING={PYRO_SESSION_STRING is not None}, CHANNEL_ID={CHANNEL_ID}, CHANNEL_ID_LOG={CHANNEL_ID_LOG}, FIRST_MSG_ID={FIRST_MSG_ID}, LAST_MSG_ID={LAST_MSG_ID}")
+    exit(1)
 
 # 2. إحصائيات وأداء
 total_reported_duplicates = 0
@@ -38,27 +34,73 @@ async def collect_files(client, channel_id, first_msg_id, last_msg_id):
     
     start_collect = time.time()
     
-    # استخدام asyncio.Lock لمنع شروط التنافس إذا تم توسيع معالجة الرسائل لاحقًا
     lock = asyncio.Lock()
     
     print(f"جاري مسح الرسائل في القناة ID: {channel_id} من الرسالة {first_msg_id} إلى {last_msg_id}...")
     messages_scanned = 0
     
-    # `max_id` يستبعد الرسالة ذات المعرف `max_id` نفسها، لذا نضيف 1 لتضمينها.
-    async for message in client.iter_messages(channel_id, min_id=first_msg_id, max_id=last_msg_id + 1):
+    # التغيير هنا: استخدام client.iter_messages() من Pyrogram
+    # for message in client.iter_messages(chat_id=channel_id, offset_id=first_msg_id -1): # offset_id للبدء قبل رسالة معينة
+    #     # هنا يجب أن نحدد توقفًا باستخدام `messages_scanned` و `last_msg_id`
+    #     if message.id > last_msg_id:
+    #         break
+
+    # Pyrogram ليس لديها min_id و max_id مباشرين في iter_messages مثل Telethon
+    # سنحتاج إلى تكرار كل الرسائل ومن ثم تطبيق الفلترة يدوياً
+    
+    # حل بديل لـ min_id و max_id في Pyrogram iter_messages
+    # يمكن استخدام offset_id للبدء من رسالة معينة أو عدد محدد
+    
+    # لضمان الفحص ضمن النطاق بشكل فعال مع Pyrogram،
+    # سنحتاج لضبط عدد الرسائل (limit) وتقليب الرسائل إذا لزم الأمر،
+    # أو استخدام offset_id مع التحكم اليدوي.
+
+    # النهج الأكثر موثوقية: التكرار للخلف حتى first_msg_id إذا كان كبيراً
+    # أو التكرار للأمام وتطبيق الشرط يدويًا.
+
+    # إذا كان النطاق صغيرًا (مثل 1 إلى 1000)، يمكننا تكرار الأحدث وتجاهل القديم
+    # وإذا كان النطاق كبيراً (مثل 1000000 إلى 1001000)، نستخدم offset_id
+
+    # لتبسيط الكود وحل المشكلة الحالية، سنستخدم طريقة أكثر عمومية:
+    # التكرار عبر الرسائل بترتيب تنازلي (الأحدث أولاً) وتجاهل التي هي خارج النطاق.
+    
+    # لعدد الرسائل, limit: يمكن أن يكون رقمًا كبيرًا جداً، أو يمكننا التحكم في ذلك يدوياً
+    # بما أننا نحدد First_Msg_ID و Last_Msg_ID، فالمفتاح هو معالجة الرسائل
+    # التي تقع ضمن هذا النطاق فقط.
+
+    # أفضل طريقة هي استخدام client.get_messages لجلب مجموعة من الرسائل أو التكرار العكسي إذا كان first_msg_id أصغر
+    
+    # هذا هو التغيير الرئيسي في منطق التكرار لـ Pyrogram
+    async for message in client.iter_messages(chat_id=channel_id):
+        if message.id > last_msg_id:
+            # الرسالة أحدث من النطاق المحدد، ننتقل للتي قبلها
+            continue
+        elif message.id < first_msg_id:
+            # الرسالة أقدم من النطاق المحدد، توقفنا عن البحث
+            break
+        
         messages_scanned += 1
         
-        # التأكد من أن الرسالة تحتوي على ملف وأن له حجم
-        if message.file and hasattr(message.file, 'size'):
-            file_size = message.file.size
-            async with lock:
-                if file_size in file_dict:
-                    file_dict[file_size].append(message.id)
-                else:
-                    file_dict[file_size] = [message.id]
+        if message.document or message.photo or message.video or message.audio: # تأكد من التعامل مع أنواع الملفات المختلفة
+            file_size = 0
+            if message.document and message.document.file_size:
+                file_size = message.document.file_size
+            elif message.photo and message.photo.file_size:
+                file_size = message.photo.file_size
+            elif message.video and message.video.file_size:
+                file_size = message.video.file_size
+            elif message.audio and message.audio.file_size:
+                file_size = message.audio.file_size
+
+            if file_size > 0: # تأكد أن الملف له حجم فعلاً
+                async with lock:
+                    if file_size in file_dict:
+                        file_dict[file_size].append(message.id)
+                    else:
+                        file_dict[file_size] = [message.id]
         
         if messages_scanned % 500 == 0:
-            print(f"تم مسح {messages_scanned} رسالة حتى الآن...")
+            print(f"تم مسح {messages_scanned} رسالة (IDs من {first_msg_id} إلى {last_msg_id})...")
 
     processing_time = time.time() - start_collect
     processing_times.append(('collect_files', processing_time))
@@ -68,35 +110,47 @@ async def collect_files(client, channel_id, first_msg_id, last_msg_id):
 async def send_duplicate_links_report(client, source_chat_id, destination_chat_id, message_ids):
     """
     يرسل تقريراً بروابط الرسائل المكررة إلى قناة السجل، مع تأخير زمني.
+    Pyrogram لا يدعم روابط t.me/c/id/msg_id مباشرة بهذا التنسيق بدون User ID,
+    ولكن هذا التنسيق هو لـ Desktop client أو web (Telegram WebK)
+    والرابط هو `https://t.me/c/<channel_id_without_supergroup_prefix>/<message_id>`
+    يجب حذف `-100` أو تحويلها من -100xxxxxxxxxx إلى xxxxxxxxxx
     """
     global total_reported_duplicates, total_duplicate_messages
     
-    if not message_ids or len(message_ids) < 2: # تأكد أن هناك رسالة أصلية وتكرار واحد على الأقل
+    if not message_ids or len(message_ids) < 2:
         return
 
     original_msg_id = message_ids[0]
     duplicate_msg_ids = message_ids[1:]
 
+    # تحويل CHANNEL_ID من -100 إلى ما يناسب الروابط (إزالة -100)
+    # للحصول على ID القناة بدون prefix (هذا ما يتوقعه t.me/c/)
+    # مثال: -1001234567890 تتحول إلى 1234567890
+    if str(source_chat_id).startswith('-100'):
+        clean_source_chat_id = str(source_chat_id)[4:]
+    else:
+        clean_source_chat_id = str(source_chat_id) # إذا كانت ID بوت أو يوزر
+
     total_reported_duplicates += 1
     total_duplicate_messages += len(duplicate_msg_ids)
     
     report_message = f"📌 **تم العثور على ملفات مكررة (حسب الحجم)!**\n\n"
-    report_message += f"🔗 **الرسالة الأصلية:** `https://t.me/c/{str(source_chat_id)[4:]}/{original_msg_id}`\n\n"
+    report_message += f"🔗 **الرسالة الأصلية:** `https://t.me/c/{clean_source_chat_id}/{original_msg_id}`\n\n"
     report_message += "**النسخ المكررة:**\n"
 
     for msg_id in duplicate_msg_ids:
-        report_message += f"- `https://t.me/c/{str(source_chat_id)[4:]}/{msg_id}`\n"
+        report_message += f"- `https://t.me/c/{clean_source_chat_id}/{msg_id}`\n"
     
     try:
         start_send = time.time()
-        await client.send_message(destination_chat_id, report_message)
+        # client.send_message() في Pyrogram
+        await client.send_message(chat_id=destination_chat_id, text=report_message)
         print(f"✅ تم إرسال تقرير عن {len(duplicate_msg_ids)} تكرار.")
-    except FloodWaitError as e:
-        print(f"⏳ (تقرير الروابط) انتظر {e.seconds} ثانية...")
-        await asyncio.sleep(e.seconds + 1)
-        # محاولة الإرسال مرة أخرى بعد الانتظار
+    except FloodWait as e: # استخدام FloodWait من Pyrogram
+        print(f"⏳ (تقرير الروابط) انتظر {e.value} ثانية...")
+        await asyncio.sleep(e.value + 1)
         try:
-            await client.send_message(destination_chat_id, report_message)
+            await client.send_message(chat_id=destination_chat_id, text=report_message)
         except Exception as retry_e:
             print(f"⚠️ فشل إرسال تقرير الروابط بعد الانتظار: {retry_e}")
     except Exception as e:
@@ -104,7 +158,6 @@ async def send_duplicate_links_report(client, source_chat_id, destination_chat_i
     
     processing_times.append(('send_duplicate_links_report', time.time() - start_send))
     
-    # تأخير 5 ثواني بعد كل رسالة تقرير
     await asyncio.sleep(5)
 
 
@@ -113,15 +166,11 @@ async def send_statistics(client):
     global total_reported_duplicates, total_duplicate_messages, start_time
     
     total_time = time.time() - start_time
-    # تجنب الخطأ في حالة القسمة على صفر
     avg_time = sum(t[1] for t in processing_times) / len(processing_times) if processing_times else 0
     
-    # تنسيق أفضل لعرض أبطأ المهام
     slowest_tasks_str = ""
     if processing_times:
-        # ترتيب المهام حسب وقت المعالجة تنازليًا
         sorted_times = sorted(processing_times, key=lambda x: x[1], reverse=True)
-        # أخذ أول 3 مهام (أو أقل إذا كانت المهام الكلية أقل)
         for name, duration in sorted_times[:3]:
             slowest_tasks_str += f"- {name}: {duration:.2f} ثانية\n"
     else:
@@ -139,13 +188,13 @@ async def send_statistics(client):
     """
     
     try:
-        await client.send_message(CHANNEL_ID_LOG, report)
+        await client.send_message(chat_id=CHANNEL_ID_LOG, text=report) # استخدام chat_id و text
         print("✅ تم إرسال التقرير الإحصائي النهائي.")
-    except FloodWaitError as e:
-        print(f"⏳ (تقرير نهائي) انتظر {e.seconds} ثانية...")
-        await asyncio.sleep(e.seconds + 1)
+    except FloodWait as e:
+        print(f"⏳ (تقرير نهائي) انتظر {e.value} ثانية...")
+        await asyncio.sleep(e.value + 1)
         try:
-            await client.send_message(CHANNEL_ID_LOG, report)
+            await client.send_message(chat_id=CHANNEL_ID_LOG, text=report)
         except Exception as retry_e:
             print(f"⚠️ فشل إرسال التقرير النهائي بعد الانتظار: {retry_e}")
     except Exception as e:
@@ -160,26 +209,32 @@ async def find_and_report_duplicates(client, channel_id):
     
     print(f"⚡ بدأ إعداد تقارير الروابط للملفات المكررة. تم العثور على {len(file_dict)} ملفًا فريدًا حسب الحجم.")
     
-    # قائمة بمهام إرسال التقارير
     report_tasks = []
     
     for file_size, msg_ids in file_dict.items():
-        if len(msg_ids) > 1:  # إذا كان هناك أكثر من رسالة بنفس الحجم
+        if len(msg_ids) > 1:
             report_tasks.append(send_duplicate_links_report(client, channel_id, CHANNEL_ID_LOG, msg_ids))
     
     print(f"سيتم إرسال تقارير لـ {len(report_tasks)} مجموعة من التكرارات.")
     
-    # تنفيذ المهام بترتيب تسلسلي مع التأخير بينها (للسيطرة على FloodWait)
     for task in report_tasks:
-        await task # تنتظر اكتمال كل مهمة قبل بدء التالية
+        await task
     
     await send_statistics(client)
     print(f"🏁 اكتملت العملية في {time.time()-start_time:.2f} ثانية.")
 
 async def main():
-    async with TelegramClient(StringSession(SESSION), API_ID, API_HASH) as client:
-        print("🚀 اتصال ناجح بالتيليجرام.")
-        await client.get_me() # لاختبار الاتصال
+    # تهيئة عميل Pyrogram
+    async with Client(
+        name="my_pyrogram_session", # أي اسم للجلسة (سيُستخدم لإنشاء ملف .session)
+        api_id=API_ID,
+        api_hash=API_HASH,
+        session_string=PYRO_SESSION_STRING, # هنا نستخدم سلسلة الجلسة الخاصة بـ Pyrogram
+        in_memory=True # هذا سيمنع Pyrogram من حفظ ملف الجلسة على القرص
+    ) as client:
+        print("🚀 اتصال ناجح بالتيليجرام باستخدام Pyrogram.")
+        me = await client.get_me() # لاختبار الاتصال
+        print(f"متصل كـ: {me.first_name} (@{me.username})")
         await find_and_report_duplicates(client, CHANNEL_ID)
 
 if __name__ == '__main__':
@@ -191,11 +246,8 @@ if __name__ == '__main__':
         loop = None
     
     if loop and loop.is_running():
-        # إذا كان هناك حدث حلقه بالفعل، قم بتشغيل المهمة في الخلفية
         print("💡 تم اكتشاف حلقة أحداث قائمة، تشغيل main كـ asyncio.create_task.")
         asyncio.create_task(main())
     else:
-        # إذا لم يكن هناك حدث حلقه، قم بتشغيله كالمعتاد
         asyncio.run(main())
-
 # --- نهاية الكود الرئيسي للبوت أو السكربت ---
