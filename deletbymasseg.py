@@ -11,7 +11,7 @@ from pyrogram.enums import ParseMode
 from pyrogram.errors import FloodWait, MessageDeleteForbidden, RPCError
 from dotenv import load_dotenv
 
-def get_random_delay(min_delay=5, max_delay=40, min_diff=10):
+def get_random_delay(min_delay=5, max_delay=30, min_diff=5):
     """
     تُولد قيمة تأخير عشوائية بين min_delay و max_delay.
     إذا كانت القيمة الجديدة قريبة جدًا (فرق أقل من min_diff) من القيمة السابقة،
