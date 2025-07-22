@@ -70,10 +70,10 @@ async def send_duplicate_links_report(client, source_chat_id, destination_chat_i
     source_channel_id_for_link = str(source_chat_id).replace("-100", "")
     
     report_message = f"📌 **تم العثور على ملفات مكررة (حسب الحجم)!**\n\n"
-    report_message += f"🔗 **الرسالة الأصلية:** `https://t.me/c/{source_channel_id_for_link}/{original_msg_id}`\n\n"
+    report_message += f"🔗 **الرسالة الأصلية:** https://t.me/c/{source_channel_id_for_link}/{original_msg_id}\n\n"
     report_message += "**النسخ المكررة:**\n"
     for msg_id in duplicate_msg_ids:
-        report_message += f"- `https://t.me/c/{source_channel_id_for_link}/{msg_id}`\n"
+        report_message += f"https://t.me/c/{source_channel_id_for_link}/{msg_id}\n"
     
     try:
         start_send = time.time()
