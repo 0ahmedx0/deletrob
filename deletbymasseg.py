@@ -1,33 +1,34 @@
-# --- بداية الكود الرئيسي للبوت أو السكربت (مجددًا Telethon مع Bot Token) ---
+# --- الكود الرئيسي (مجددًا Telethon مع Bot Token) ---
 import os
 import asyncio
 import time
-from telethon import TelegramClient # العودة لـ Telethon
-from telethon.tl.types import Message # لتصنيف الرسائل والتعامل مع أنواع الملفات
-from telethon.errors import FloodWaitError # خطأ FloodWait في Telethon
+from telethon import TelegramClient
+from telethon.tl.types import Message
+from telethon.errors import FloodWaitError
 
 # 1. إعدادات تيليجرام - قراءة المتغيرات مباشرة من البيئة
 API_ID = int(os.getenv('API_ID', 0))
 API_HASH = os.getenv('API_HASH')
-BOT_TOKEN = os.getenv('BOT_TOKEN') # استخدام توكن البوت
+BOT_TOKEN = os.getenv('BOT_TOKEN') 
 
-# CHANNEL_ID الآن يمكن أن يكون اسم مستخدم (@username) أو ID رقمي سالب (-100xxxxxxx)
 CHANNEL_ID = os.getenv('CHANNEL_ID') 
-CHANNEL_ID_LOG = (os.getenv('CHANNEL_ID_LOG', 0)) # قناة السجل تبقى رقمية
+CHANNEL_ID_LOG = (os.getenv('CHANNEL_ID_LOG', 0)) 
 FIRST_MSG_ID = int(os.getenv('FIRST_MSG_ID', 0))
 LAST_MSG_ID = int(os.getenv('LAST_MSG_ID', 0))
 
-# للتحقق من أن المتغيرات الأساسية قد تم تحميلها
 if not all([API_ID, API_HASH, BOT_TOKEN, CHANNEL_ID, CHANNEL_ID_LOG, FIRST_MSG_ID, LAST_MSG_ID]):
     print("❌ خطأ: بعض المتغيرات البيئية الأساسية غير موجودة أو فارغة.")
     print(f"تحقق من API_ID={API_ID}, API_HASH={API_HASH}, BOT_TOKEN={BOT_TOKEN is not None}, CHANNEL_ID={CHANNEL_ID}, CHANNEL_ID_LOG={CHANNEL_ID_LOG}, FIRST_MSG_ID={FIRST_MSG_ID}, LAST_MSG_ID={LAST_MSG_ID}")
     exit(1)
 
-# 2. إحصائيات وأداء
+# 2. إحصائيات وأداء (لا يوجد تغيير)
 total_reported_duplicates = 0
 total_duplicate_messages = 0
 processing_times = []
 start_time = None
+
+# باقي الدوال (collect_files, send_duplicate_links_report, send_statistics, find_and_report_duplicates)
+# تبقى كما هي بالضبط.
 
 async def collect_files(client, channel_id, first_msg_id, last_msg_id):
     """إصدار محسّن لجمع الملفات يعتمد على حجم الملف، ضمن نطاق IDs محدد."""
@@ -36,21 +37,14 @@ async def collect_files(client, channel_id, first_msg_id, last_msg_id):
     
     start_collect = time.time()
     
-    lock = asyncio.Lock() # لا يزال مفيدًا لمهام المستقبل
+    lock = asyncio.Lock()
 
     print(f"جاري مسح الرسائل في القناة ID: {channel_id} من الرسالة {first_msg_id} إلى {last_msg_id}...")
     messages_scanned = 0
     
-    # === العودة إلى iter_messages في Telethon، وهو يعمل بشكل جيد مع Bot Token ===
-    # min_id: الرسائل التي تلي هذا المعرف
-    # max_id: الرسائل التي تسبق هذا المعرف (لا يتضمنها)
-    # لذلك، إذا أردنا تضمين last_msg_id، نجعل max_id = last_msg_id + 1
-    
     async for message in client.iter_messages(channel_id, min_id=first_msg_id, max_id=last_msg_id + 1):
         messages_scanned += 1
         
-        # في Telethon، message.file يحتوي على كل شيء (Document, Photo, etc.)
-        # message.file لديه خاصية size مباشرة.
         if message.file and hasattr(message.file, 'size'):
             file_size = message.file.size
             async with lock:
@@ -68,9 +62,6 @@ async def collect_files(client, channel_id, first_msg_id, last_msg_id):
     return file_dict
 
 async def send_duplicate_links_report(client, source_chat_id, destination_chat_id, message_ids):
-    """
-    يرسل تقريراً بروابط الرسائل المكررة إلى قناة السجل، مع تأخير زمني.
-    """
     global total_reported_duplicates, total_duplicate_messages
     
     if not message_ids or len(message_ids) < 2:
@@ -79,20 +70,13 @@ async def send_duplicate_links_report(client, source_chat_id, destination_chat_i
     original_msg_id = message_ids[0]
     duplicate_msg_ids = message_ids[1:]
 
-    # تحويل CHANNEL_ID من -100 إلى ما يناسب الروابط (إزالة -100)
-    # Telethon تتعامل مع IDs، ولكن روابط t.me/c/ تستخدم ID بدون prefix
-    # إذا كان source_chat_id string (اسم مستخدم)، فقد نحتاج أولاً للحصول على ID الرقمي
-    # بما أن CHANNEL_ID يمكن أن يكون اسم مستخدم، فلنحوله إلى ID رقمي
     try:
-        # يمكن أن تكون source_chat_id اسم مستخدم هنا أيضاً، لذا سنحلها
         chat_entity = await client.get_entity(source_chat_id)
         clean_source_chat_id = str(chat_entity.id)
-        if clean_source_chat_id.startswith('-100'): # لازال هذا التحويل لروابط t.me/c/
+        if clean_source_chat_id.startswith('-100'):
             clean_source_chat_id = clean_source_chat_id[4:]
     except Exception:
-        # في حالة عدم القدرة على حل الكيان، نستخدم القيمة الأصلية ونفترضها ID رقمي
-        # ولكنها لن تكون الرابط صحيحا إذا لم تكن ID رقمي سوبر جروب
-        clean_source_chat_id = str(source_chat_id).replace('-100', '') # fallback for linking
+        clean_source_chat_id = str(source_chat_id).replace('-100', '')
 
     total_reported_duplicates += 1
     total_duplicate_messages += len(duplicate_msg_ids)
@@ -108,7 +92,7 @@ async def send_duplicate_links_report(client, source_chat_id, destination_chat_i
         start_send = time.time()
         await client.send_message(destination_chat_id, report_message)
         print(f"✅ تم إرسال تقرير عن {len(duplicate_msg_ids)} تكرار.")
-    except FloodWaitError as e: # استخدام FloodWaitError من Telethon
+    except FloodWaitError as e:
         print(f"⏳ (تقرير الروابط) انتظر {e.seconds} ثانية...")
         await asyncio.sleep(e.seconds + 1)
         try:
@@ -186,12 +170,14 @@ async def find_and_report_duplicates(client, channel_id):
     print(f"🏁 اكتملت العملية في {time.time()-start_time:.2f} ثانية.")
 
 async def main():
-    # === تهيئة عميل Telethon مع توكن البوت ===
-    # هنا يمكنك استخدام "bot_session" كاسم ملف الجلسة الذي سيتم إنشاؤه.
-    # سيتم إنشاء ملف bot_session.session تلقائيًا.
-    async with TelegramClient("bot_session", API_ID, API_HASH).start(bot_token=BOT_TOKEN) as client:
+    # 🚨🚨🚨 هذا هو التغيير الرئيسي في دالة main 🚨🚨🚨
+    client = TelegramClient("bot_session", API_ID, API_HASH) # أنشئ الكائن
+    await client.start(bot_token=BOT_TOKEN) # ابدأ الكائن بشكل منفصل
+    
+    # الآن استخدم async with مع الكائن الذي تم إنشاؤه وبدأ تشغيله
+    async with client: # هنا يمكنك استخدام async with
         print("🚀 اتصال ناجح بالتيليجرام باستخدام Telethon مع Bot Token.")
-        me = await client.get_me() # ستُرجع معلومات عن البوت نفسه
+        me = await client.get_me()
         print(f"متصل كـ: {me.first_name} (@{me.username})")
         await find_and_report_duplicates(client, CHANNEL_ID)
 
@@ -207,4 +193,4 @@ if __name__ == '__main__':
         asyncio.create_task(main())
     else:
         asyncio.run(main())
-# --- نهاية الكود الرئيسي للبوت أو السكربت ---
+    # --- نهاية الكود الرئيسي للبوت أو السكربت ---
