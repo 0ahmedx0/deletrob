@@ -1,8 +1,10 @@
 import asyncio
 import os
 import time
+import math
 
 from pyrogram import Client
+from pyrogram.errors import FloodWait
 from dotenv import load_dotenv
 
 # تحميل إعدادات البيئة
@@ -11,108 +13,152 @@ load_dotenv()
 # إعدادات تيليجرام
 API_ID = int(os.getenv('API_ID', 0))
 API_HASH = os.getenv('API_HASH')
-SESSION = os.getenv('SESSION') # سيتم استخدامه لإنشاء اسم ملف الجلسة
-CHANNEL_ID = int(os.getenv('CHANNEL_ID', 0))  # القناة المصدر التي سيتم فحصها
+SESSION = os.getenv('SESSION')
+CHANNEL_ID = int(os.getenv('CHANNEL_ID', 0)) # القناة المصدر التي سيتم فحصها
 FIRST_MSG_ID = int(os.getenv('FIRST_MSG_ID', 0))
 
-# تحديد حجم الملف بالبايت (50 ميجابايت)
-MIN_FILE_SIZE_BYTES = 50 * 1024 * 1024
+# --- إعدادات المهمة الجديدة ---
+SIZE_THRESHOLD_MB = 50  # حد الحجم بالميغابايت
+SIZE_THRESHOLD_BYTES = SIZE_THRESHOLD_MB * 1024 * 1024 # تحويل الحجم إلى بايت
+OUTPUT_FILE = "report.txt" # اسم ملف التقرير الناتج
 
-# اسم ملف التقرير
-REPORT_FILENAME = "report.txt"
+# متغيرات لتتبع الأداء
+start_time = None
+total_files_found = 0
 
 # ----------------- الدوال -----------------
 
-async def collect_large_files(client, channel_id, first_msg_id):
+def format_size(size_bytes):
+    """تحويل حجم الملف بالبايت إلى صيغة قابلة للقراءة (KB, MB, GB)."""
+    if size_bytes == 0:
+        return "0B"
+    size_name = ("B", "KB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB")
+    # استخدام math.log للعثور على المؤشر الصحيح لاسم الحجم
+    i = int(math.floor(math.log(size_bytes, 1024)))
+    p = math.pow(1024, i)
+    s = round(size_bytes / p, 2)
+    return f"{s} {size_name[i]}"
+
+async def find_large_files(client, channel_id, first_msg_id):
     """
-    تقوم بمسح القناة وتجميع الرسائل التي تحتوي على فيديوهات أو مستندات
-    أكبر من الحجم المحدد.
+    تبحث في القناة عن الفيديوهات والمستندات التي يتجاوز حجمها الحد المحدد.
     """
-    large_files_messages = []
-    print("جاري مسح الرسائل في القناة للبحث عن الملفات الكبيرة...")
+    global total_files_found
+    large_files = []
+    print(f"🔍 جاري البحث عن الفيديوهات والمستندات الأكبر من {SIZE_THRESHOLD_MB} ميجابايت...")
+    
     messages_scanned = 0
-    
-    async for message in client.get_chat_history(channel_id):
-        if message.id <= first_msg_id:
-            break
+    try:
+        # استخدام `await client.get_chat_history` للحصول على الرسائل
+        async for message in client.get_chat_history(channel_id):
+            # التوقف إذا وصلنا إلى أقدم رسالة محددة
+            if message.id <= first_msg_id:
+                break
 
-        messages_scanned += 1
-        if messages_scanned % 500 == 0:
-            print(f"تم مسح {messages_scanned} رسالة حتى الآن...")
-
-        media = message.video or message.document
-        if media and hasattr(media, 'file_size') and media.file_size > MIN_FILE_SIZE_BYTES:
-            large_files_messages.append(message)
+            messages_scanned += 1
+            if messages_scanned % 500 == 0:
+                print(f"تم مسح {messages_scanned} رسالة حتى الآن...")
             
-    print(f"اكتمل المسح. تم العثور على {len(large_files_messages)} ملف بحجم أكبر من 50 ميجابايت.")
-    return large_files_messages
-
-async def generate_report_file(messages, source_chat_id):
-    """
-    تقوم بإنشاء ملف نصي يحتوي على روابط وأحجام الملفات الكبيرة.
-    """
-    if not messages:
-        print("لم يتم العثور على ملفات تطابق الشروط. لن يتم إنشاء ملف تقرير.")
-        return
-
-    source_channel_id_for_link = str(source_chat_id).replace("-100", "")
-
-    with open(REPORT_FILENAME, 'w', encoding='utf-8') as f:
-        f.write(f"تقرير بالملفات التي يزيد حجمها عن {MIN_FILE_SIZE_BYTES / (1024*1024):.0f} ميجابايت\n")
-        f.write("="*50 + "\n\n")
-
-        # فرز الرسائل من الأقدم إلى الأحدث لعرضها بترتيب منطقي في التقرير
-        sorted_messages = sorted(messages, key=lambda m: m.id)
-
-        for message in sorted_messages:
+            # التحقق مما إذا كانت الرسالة تحتوي على فيديو أو مستند
             media = message.video or message.document
-            file_size_mb = media.file_size / (1024 * 1024)
-            link = f"https://t.me/c/{source_channel_id_for_link}/{message.id}"
             
-            report_line = f"الرابط: {link}\nالحجم: {file_size_mb:.2f} MB\n"
-            report_line += "-"*30 + "\n"
+            if media and hasattr(media, 'file_size') and media.file_size is not None:
+                # التحقق مما إذا كان حجم الملف أكبر من الحد المحدد
+                if media.file_size > SIZE_THRESHOLD_BYTES:
+                    # بناء رابط الرسالة
+                    # يتم إزالة '-100' من معرف القناة لإنشاء رابط صحيح
+                    link = f"https://t.me/c/{str(channel_id).replace('-100', '')}/{message.id}"
+                    
+                    # تخزين الرابط وحجم الملف
+                    large_files.append({
+                        "link": link,
+                        "size": media.file_size
+                    })
+                    total_files_found += 1
+                    print(f"✅ تم العثور على ملف كبير: {link} | الحجم: {format_size(media.file_size)}")
+    
+    except FloodWait as e:
+        print(f"⏳ واجهنا خطأ FloodWait. سننتظر لمدة {e.value} ثانية ونكمل.")
+        await asyncio.sleep(e.value + 5)
+        # يمكنك استدعاء الدالة مرة أخرى هنا أو معالجة الأمر بشكل أكثر تعقيدًا إذا لزم الأمر
+        
+    except Exception as e:
+        print(f"⚠️ حدث خطأ غير متوقع أثناء مسح الرسائل: {e}")
+
+    return large_files
+
+def generate_report_file(files_list):
+    """
+    تنشئ ملف نصي يحتوي على تقرير بالملفات التي تم العثور عليها.
+    """
+    print(f"\n📝 جاري كتابة التقرير في الملف: {OUTPUT_FILE}")
+    try:
+        with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
+            f.write(f"تقرير بالملفات التي يتجاوز حجمها {SIZE_THRESHOLD_MB} ميجابايت\n")
+            f.write("=" * 50 + "\n\n")
             
-            f.write(report_line)
+            if not files_list:
+                f.write("لم يتم العثور على أي ملفات تطابق المعايير.\n")
+                return
 
-    print(f"✅ تم إنشاء التقرير بنجاح وحفظه في ملف: {REPORT_FILENAME}")
+            for item in files_list:
+                file_link = item['link']
+                file_size_formatted = format_size(item['size'])
+                f.write(f"الرابط: {file_link}\n")
+                f.write(f"الحجم: {file_size_formatted}\n")
+                f.write("-" * 30 + "\n")
+        
+        print(f"✅ تم حفظ التقرير بنجاح في '{OUTPUT_FILE}'.")
+    except Exception as e:
+        print(f"❌ فشل في كتابة ملف التقرير: {e}")
 
-async def find_large_files_and_report(client, channel_id):
+async def process_channel(client, channel_id):
     """
-    الوظيفة الرئيسية التي تنسق عملية البحث وإنشاء التقرير.
+    الدالة الرئيسية التي تدير عملية البحث وإنشاء التقرير.
     """
+    global start_time
     start_time = time.time()
-    print("\n🔍 بدء عملية البحث عن الفيديوهات والمستندات التي يزيد حجمها عن 50 ميجابايت...")
     
-    large_files = await collect_large_files(client, channel_id, FIRST_MSG_ID)
+    # 1. البحث عن الملفات الكبيرة
+    large_files = await find_large_files(client, channel_id, FIRST_MSG_ID)
     
-    await generate_report_file(large_files, channel_id)
-    
-    print(f"🏁 اكتملت العملية في {time.time() - start_time:.2f} ثانية.")
+    # 2. إنشاء ملف التقرير
+    if large_files:
+        generate_report_file(large_files)
+    else:
+        print("\nℹ️ لم يتم العثور على أي ملفات تتجاوز الحجم المحدد.")
+        # ننشئ ملف تقرير فارغ للتأكيد
+        generate_report_file([])
 
-# ----------------- الدالة الرئيسية (مع التحقق المدمج) -----------------
+    total_time = time.time() - start_time
+    print(f"\n🏁 اكتملت العملية بنجاح!")
+    print(f"🔍 إجمالي الملفات التي تم العثور عليها: {total_files_found}")
+    print(f"⏱️ الوقت الكلي المستغرق: {total_time:.2f} ثانية.")
+
+# ----------------- الدالة الرئيسية -----------------
 
 async def main():
-    # استخدام اسم جلسة مخصص لتجنب التعارض. Pyrogram سيُنشئ ملف 'scanner_session.session'
-    async with Client("scanner_session", api_id=API_ID, api_hash=API_HASH) as client:
-        print("🚀 اتصال ناجح بالتيليجرام عبر Pyrogram.")
+    # استخدام `with Client(...)` يضمن إغلاق الجلسة بشكل آمن
+    async with Client("my_account_session", api_id=API_ID, api_hash=API_HASH, session_string=SESSION) as client:
+        user = await client.get_me()
+        print(f"🚀 تم تسجيل الدخول بنجاح كـ: {user.first_name}")
 
-        # --- بداية كتلة التحقق المطلوبة ---
-        print("💡 جارٍ التحقق من الوصول إلى القناة المصدر...")
+        print("\n💡 جارٍ التحقق من الوصول إلى القناة المصدر...")
         try:
-            # التحقق من أن الحساب يمكنه الوصول إلى القناة المطلوبة
+            # التحقق من أن CHANNEL_ID هو قناة صالحة يمكن الوصول إليها
             await client.get_chat(CHANNEL_ID)
-            print("✅ تم التحقق من الوصول إلى القناة المصدر بنجاح.")
+            print(f"✅ تم التحقق من الوصول إلى القناة ({CHANNEL_ID}) بنجاح.")
         except Exception as e:
-            # في حالة الفشل، اطبع رسالة خطأ واضحة وتوقف عن التنفيذ
-            print(f"❌ خطأ فادح: لا يمكن الوصول إلى القناة المصدر (CHANNEL_ID: {CHANNEL_ID}).")
+            print(f"❌ خطأ فادح: لا يمكن الوصول إلى القناة المحددة في `CHANNEL_ID`.")
             print(f"تفاصيل الخطأ: {e}")
-            print("\nيرجى التأكد من أن: \n1. معرف القناة صحيح.\n2. الحساب المستخدم هو عضو في القناة الخاصة.")
-            return # إيقاف السكربت
-        # --- نهاية كتلة التحقق ---
+            return
 
-        # إذا نجح التحقق، استمر في تنفيذ الوظيفة الرئيسية
-        await find_large_files_and_report(client, CHANNEL_ID)
+        await process_channel(client, CHANNEL_ID)
 
 if __name__ == '__main__':
-    print("🔹 بدء تشغيل أداة فحص الملفات الكبيرة...")
-    asyncio.run(main())
+    # التأكد من وجود المتغيرات الأساسية
+    if not all([API_ID, API_HASH, SESSION, CHANNEL_ID]):
+        print("❌ خطأ: يرجى التأكد من تعيين كل من API_ID, API_HASH, SESSION, CHANNEL_ID في ملف .env")
+    else:
+        print("🔹 بدء تشغيل السكربت...")
+        asyncio.run(main())
