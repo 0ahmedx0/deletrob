@@ -1,11 +1,29 @@
+# متغير لتخزين آخر قيمة تأخير مستخدمة
+prev_delay = None
+
+import random
 import asyncio
 import os
 import time
-import math
 
 from pyrogram import Client
-from pyrogram.errors import FloodWait
+from pyrogram.enums import ParseMode
+from pyrogram.errors import FloodWait, MessageDeleteForbidden, RPCError
 from dotenv import load_dotenv
+
+def get_random_delay(min_delay=5, max_delay=30, min_diff=5):
+    """
+    تُولد قيمة تأخير عشوائية بين min_delay و max_delay.
+    إذا كانت القيمة الجديدة قريبة جدًا (فرق أقل من min_diff) من القيمة السابقة،
+    يتم إعادة التوليد.
+    """
+    global prev_delay
+    delay = random.randint(min_delay, max_delay)
+    # حلقة While loop لضمان أن التأخير الجديد ليس قريبًا جدًا من السابق
+    while prev_delay is not None and abs(delay - prev_delay) < min_diff:
+        delay = random.randint(min_delay, max_delay)
+    prev_delay = delay
+    return delay
 
 # تحميل إعدادات البيئة
 load_dotenv()
@@ -13,152 +31,318 @@ load_dotenv()
 # إعدادات تيليجرام
 API_ID = int(os.getenv('API_ID', 0))
 API_HASH = os.getenv('API_HASH')
-SESSION = os.getenv('SESSION')
-CHANNEL_ID = int(os.getenv('CHANNEL_ID', 0)) # القناة المصدر التي سيتم فحصها
+
+# اسم ملف الجلسة
+# إذا لم يتم تعيين SESSION في .env، فسيتم إنشاء ملف باسم "my_account_session"
+# إذا تم تعيينه (مثلاً 'mysessionname'), فسيستخدم هذا الاسم
+SESSION_NAME = os.getenv('SESSION', "my_account_session") 
+
+CHANNEL_ID = int(os.getenv('CHANNEL_ID', 0)) # القناة الأصلية (المصدر)
+CHANNEL_ID_LOG = int(os.getenv('CHANNEL_ID_LOG', 0)) # قناة السجلات والوجهة للمكررات المنقولة
 FIRST_MSG_ID = int(os.getenv('FIRST_MSG_ID', 0))
 
-# --- إعدادات المهمة الجديدة ---
-SIZE_THRESHOLD_MB = 50  # حد الحجم بالميغابايت
-SIZE_THRESHOLD_BYTES = SIZE_THRESHOLD_MB * 1024 * 1024 # تحويل الحجم إلى بايت
-OUTPUT_FILE = "report.txt" # اسم ملف التقرير الناتج
-
-# متغيرات لتتبع الأداء
+# إحصائيات وأداء (تعريف المتغيرات العامة)
+total_reported_duplicates = 0
+total_duplicate_messages = 0
+total_deleted_messages = 0 # عداد جديد للرسائل المحذوفة
+total_moved_messages = 0   # عداد جديد للرسائل المنقولة
+processing_times = []
 start_time = None
-total_files_found = 0
 
 # ----------------- الدوال -----------------
 
-def format_size(size_bytes):
-    """تحويل حجم الملف بالبايت إلى صيغة قابلة للقراءة (KB, MB, GB)."""
-    if size_bytes == 0:
-        return "0B"
-    size_name = ("B", "KB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB")
-    # استخدام math.log للعثور على المؤشر الصحيح لاسم الحجم
-    i = int(math.floor(math.log(size_bytes, 1024)))
-    p = math.pow(1024, i)
-    s = round(size_bytes / p, 2)
-    return f"{s} {size_name[i]}"
-
-async def find_large_files(client, channel_id, first_msg_id):
-    """
-    تبحث في القناة عن الفيديوهات والمستندات التي يتجاوز حجمها الحد المحدد.
-    """
-    global total_files_found
-    large_files = []
-    print(f"🔍 جاري البحث عن الفيديوهات والمستندات الأكبر من {SIZE_THRESHOLD_MB} ميجابايت...")
-    
-    messages_scanned = 0
+async def delete_message(client, chat_id, message_id):
+    """تحذف رسالة من قناة مع معالجة الأخطاء."""
+    global total_deleted_messages
     try:
-        # استخدام `await client.get_chat_history` للحصول على الرسائل
-        async for message in client.get_chat_history(channel_id):
-            # التوقف إذا وصلنا إلى أقدم رسالة محددة
-            if message.id <= first_msg_id:
-                break
-
-            messages_scanned += 1
-            if messages_scanned % 500 == 0:
-                print(f"تم مسح {messages_scanned} رسالة حتى الآن...")
-            
-            # التحقق مما إذا كانت الرسالة تحتوي على فيديو أو مستند
-            media = message.video or message.document
-            
-            if media and hasattr(media, 'file_size') and media.file_size is not None:
-                # التحقق مما إذا كان حجم الملف أكبر من الحد المحدد
-                if media.file_size > SIZE_THRESHOLD_BYTES:
-                    # بناء رابط الرسالة
-                    # يتم إزالة '-100' من معرف القناة لإنشاء رابط صحيح
-                    link = f"https://t.me/c/{str(channel_id).replace('-100', '')}/{message.id}"
-                    
-                    # تخزين الرابط وحجم الملف
-                    large_files.append({
-                        "link": link,
-                        "size": media.file_size
-                    })
-                    total_files_found += 1
-                    print(f"✅ تم العثور على ملف كبير: {link} | الحجم: {format_size(media.file_size)}")
-    
+        await client.delete_messages(chat_id, message_id)
+        total_deleted_messages += 1
+        print(f"🗑️ تم حذف الرسالة ID: {message_id} من {chat_id}.")
+        return True
     except FloodWait as e:
-        print(f"⏳ واجهنا خطأ FloodWait. سننتظر لمدة {e.value} ثانية ونكمل.")
-        await asyncio.sleep(e.value + 5)
-        # يمكنك استدعاء الدالة مرة أخرى هنا أو معالجة الأمر بشكل أكثر تعقيدًا إذا لزم الأمر
-        
+        print(f"⏳ (حذف الرسائل) انتظر {e.value} ثانية قبل إعادة المحاولة...")
+        await asyncio.sleep(e.value + 1)
+        await client.delete_messages(chat_id, message_id) # محاولة أخرى بعد الانتظار
+        total_deleted_messages += 1
+        return True
+    except MessageDeleteForbidden:
+        print(f"🚫 لا يمكن حذف الرسالة ID: {message_id}. البوت لا يمتلك الصلاحيات الكافية.")
+        return False
+    except RPCError as e:
+        print(f"⚠️ خطأ RPC أثناء حذف الرسالة ID: {message_id}: {e}")
+        return False
     except Exception as e:
-        print(f"⚠️ حدث خطأ غير متوقع أثناء مسح الرسائل: {e}")
+        print(f"⚠️ خطأ غير متوقع أثناء حذف الرسالة ID: {message_id}: {e}")
+        return False
 
-    return large_files
+async def collect_files(client, channel_id, first_msg_id):
+    global processing_times # التصريح باستخدام المتغير العام
+    file_dict = {}
+    start_collect = time.time()
 
-def generate_report_file(files_list):
-    """
-    تنشئ ملف نصي يحتوي على تقرير بالملفات التي تم العثور عليها.
-    """
-    print(f"\n📝 جاري كتابة التقرير في الملف: {OUTPUT_FILE}")
-    try:
-        with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
-            f.write(f"تقرير بالملفات التي يتجاوز حجمها {SIZE_THRESHOLD_MB} ميجابايت\n")
-            f.write("=" * 50 + "\n\n")
+    # تأمين الوصول إلى file_dict لتجنب مشاكل التزامن (ليس ضروريا تماما هنا ولكنه ممارسة جيدة)
+    lock = asyncio.Lock() 
+
+    async def process_message(message):
+        # Media (مستندات، فيديوهات، صوتيات) يمكن أن تكون هي التي لديها file_size
+        # الصور أيضاً قد تكون لها file_size إذا لم تكن صورة عادية.
+        media = message.document or message.video or message.audio or message.photo
+        if media and hasattr(media, 'file_size') and media.file_size is not None:
+            file_size = media.file_size
+            async with lock: # استخدام القفل هنا
+                if file_size in file_dict:
+                    file_dict[file_size].append(message.id)
+                else:
+                    file_dict[file_size] = [message.id]
+
+    tasks = []
+    print("جاري مسح الرسائل في القناة...")
+    messages_scanned = 0
+    # استخدام `await client.get_chat_history` للحصول على كائن مكرر
+    async for message in client.get_chat_history(channel_id):
+        if first_msg_id and message.id <= first_msg_id: break # يواصل البحث حتى هذا ID إذا تم تعيينه
+        
+        # أوقف المسح إذا كان لا يوجد FIRST_MSG_ID ومعرف الرسالة صغير جداً
+        # هذا يمنع فحص القنوات الكبيرة جداً بالكامل إذا لم يتم تحديد FIRST_MSG_ID
+        if not first_msg_id and message.id < 50: # رقم عشوائي كحد أقصى للرسائل القديمة بدون تحديد FIRST_MSG_ID
+            break
+
+        tasks.append(process_message(message))
+        messages_scanned += 1
+        # معالجة المهام على دفعات لتجنب استهلاك الذاكرة بشكل مفرط
+        if messages_scanned % 500 == 0:
+            print(f"تم مسح {messages_scanned} رسالة حتى الآن...")
+            await asyncio.gather(*tasks)
+            tasks = [] # إعادة تعيين قائمة المهام
+    if tasks:
+        await asyncio.gather(*tasks) # معالجة أي مهام متبقية
+
+    processing_times.append(('collect_files', time.time() - start_collect))
+    return file_dict
+
+async def send_duplicate_links_report(client, source_chat_id, destination_chat_id, message_ids):
+    global total_reported_duplicates, total_duplicate_messages, total_deleted_messages, total_moved_messages
+    if not message_ids or len(message_ids) < 2:
+        return # لا يوجد تكرار إذا كانت الرسائل أقل من 2
+
+    message_ids.sort()
+    original_msg_id = message_ids[0]
+    duplicate_msg_ids = message_ids[1:] # جميع الرسائل ما عدا الأولى تعتبر مكررة
+
+    total_reported_duplicates += 1
+    total_duplicate_messages += len(duplicate_msg_ids) # العدد الكلي للرسائل المكررة التي سيتم التعامل معها
+
+    source_channel_id_for_link = str(source_chat_id).replace("-100", "")
+
+    # سنقوم بنقل أول رسالة مكررة (غير الأصلية)
+    msg_id_to_move = duplicate_msg_ids[0] # الرسالة التي سيتم نقلها
+    
+    moved_successfully = False
+    deleted_duplicates_count = 0
+    
+    # 1. نقل الرسالة المكررة المحددة إلى قناة الوجهة
+    # لا تحاول النقل إذا كانت قناة الوجهة غير صالحة
+    if destination_chat_id != 0:
+        try:
+            start_transfer = time.time()
+            # جلب الرسالة للنقل
+            message_to_repost = await client.get_messages(source_chat_id, msg_id_to_move)
             
-            if not files_list:
-                f.write("لم يتم العثور على أي ملفات تطابق المعايير.\n")
-                return
+            # إعادة توجيه الرسالة (أو إرسال نسخة منها) إلى قناة الوجهة
+            # استخدام `copy_message` أفضل للحفاظ على التنسيق والكبشن وتغيير المحتوى إن لزم الأمر.
+            # `forward_messages` تنقل الرسالة كما هي مع اسم المرسل الأصلي.
+            
+            # إذا كنت تريد "نسخ" الرسالة، بحيث تظهر وكأن البوت هو من أرسلها في الوجهة:
+            await client.copy_message(
+                chat_id=destination_chat_id,
+                from_chat_id=source_chat_id,
+                message_id=msg_id_to_move
+            )
+            print(f"✅ تم نقل الرسالة المكررة ID: {msg_id_to_move} إلى قناة السجل ({destination_chat_id}).")
+            total_moved_messages += 1
+            moved_successfully = True
+            processing_times.append(('transfer_duplicate_message', time.time() - start_transfer))
 
-            for item in files_list:
-                file_link = item['link']
-                file_size_formatted = format_size(item['size'])
-                f.write(f"الرابط: {file_link}\n")
-                f.write(f"الحجم: {file_size_formatted}\n")
-                f.write("-" * 30 + "\n")
-        
-        print(f"✅ تم حفظ التقرير بنجاح في '{OUTPUT_FILE}'.")
-    except Exception as e:
-        print(f"❌ فشل في كتابة ملف التقرير: {e}")
-
-async def process_channel(client, channel_id):
-    """
-    الدالة الرئيسية التي تدير عملية البحث وإنشاء التقرير.
-    """
-    global start_time
-    start_time = time.time()
-    
-    # 1. البحث عن الملفات الكبيرة
-    large_files = await find_large_files(client, channel_id, FIRST_MSG_ID)
-    
-    # 2. إنشاء ملف التقرير
-    if large_files:
-        generate_report_file(large_files)
+        except FloodWait as e:
+            print(f"⏳ (نقل الرسالة) انتظر {e.value} ثانية...")
+            await asyncio.sleep(e.value + 1)
+            try: # محاولة إعادة النقل بعد الانتظار
+                message_to_repost = await client.get_messages(source_chat_id, msg_id_to_move)
+                await client.copy_message(chat_id=destination_chat_id, from_chat_id=source_chat_id, message_id=msg_id_to_move)
+                total_moved_messages += 1
+                moved_successfully = True
+            except Exception as retry_e:
+                print(f"⚠️ فشل إعادة نقل الرسالة بعد FloodWait: {retry_e}")
+        except Exception as e:
+            print(f"⚠️ خطأ أثناء نقل الرسالة المكررة ID: {msg_id_to_move}: {e}")
     else:
-        print("\nℹ️ لم يتم العثور على أي ملفات تتجاوز الحجم المحدد.")
-        # ننشئ ملف تقرير فارغ للتأكيد
-        generate_report_file([])
+        print("⚠️ تم تجاهل النقل: CHANNEL_ID_LOG غير متاح أو غير صحيح.")
+
+    # 2. حذف الرسائل المكررة من القناة الأصلية (بما في ذلك الرسالة المنقولة)
+    # لا تحذف الرسالة الأصلية (original_msg_id)
+    messages_to_delete = [msg_id for msg_id in message_ids if msg_id != original_msg_id]
+
+    print(f"🗑️ جاري حذف {len(messages_to_delete)} رسالة مكررة من القناة الأصلية...")
+    for msg_id in messages_to_delete:
+        if await delete_message(client, source_chat_id, msg_id):
+            deleted_duplicates_count += 1
+        # إضافة تأخير بسيط بين عمليات الحذف لتجنب FloodWait إضافية
+        await asyncio.sleep(1)
+
+    # 3. إعداد و إرسال التقرير (إذا كانت قناة السجل صالحة)
+    if destination_chat_id != 0:
+        report_message = f"📌 **تقرير الملفات المكررة والحذف والنقل!**\n\n"
+        report_message += f"🔗 **الرسالة الأصلية (غير محذوفة):** https://t.me/c/{source_channel_id_for_link}/{original_msg_id}\n\n"
+
+        if moved_successfully:
+            report_message += f"✅ **تم نقل نسخة مكررة (ID: {msg_id_to_move}) إلى:** https://t.me/c/{str(destination_chat_id).replace('-100', '')}/{message_to_repost.id if 'message_to_repost' in locals() and message_to_repost else '؟؟؟'} \n"
+        else:
+            report_message += f"❌ **فشل نقل الرسالة المكررة ID: {msg_id_to_move}.**\n"
+
+        report_message += f"🗑️ **تم حذف {deleted_duplicates_count} رسالة مكررة من القناة الأصلية.**\n"
+        if deleted_duplicates_count < len(messages_to_delete):
+            report_message += f"⚠️ **فشل حذف {len(messages_to_delete) - deleted_duplicates_count} رسالة.**\n"
+            
+        if len(duplicate_msg_ids) > 1: # إذا كان هناك أكثر من نسخة مكررة واحدة (عدا التي نقلت)
+            remaining_duplicates_for_report = [m_id for m_id in duplicate_msg_ids if m_id != msg_id_to_move]
+            if remaining_duplicates_for_report:
+                report_message += "\n**روابط النسخ المكررة الأخرى التي تم التعامل معها (والمحذوفة):**\n"
+                for msg_id in remaining_duplicates_for_report:
+                    report_message += f"https://t.me/c/{source_channel_id_for_link}/{msg_id}\n"
+
+        try:
+            start_send = time.time()
+            await client.send_message(destination_chat_id, report_message, parse_mode=ParseMode.MARKDOWN)
+            print(f"✅ تم إرسال تقرير شامل.")
+            processing_times.append(('send_detailed_report', time.time() - start_send))
+        except FloodWait as e:
+            print(f"⏳ (تقرير شامل) انتظر {e.value} ثانية...")
+            await asyncio.sleep(e.value + 1)
+            await client.send_message(destination_chat_id, report_message, parse_mode=ParseMode.MARKDOWN)
+        except Exception as e:
+            print(f"⚠️ خطأ أثناء إرسال التقرير الشامل: {e}")
+    else:
+        print("⚠️ تم تجاهل إرسال التقرير: CHANNEL_ID_LOG غير متاح أو غير صحيح.")
+
+    # --- تطبيق التأخير العشوائي بعد إرسال التقرير (أو بعد الحذف إذا لم يتم الإرسال) ---
+    delay = get_random_delay()
+    print(f"😴 انتظار {delay:.2f} ثوانٍ قبل معالجة المجموعة التالية...")
+    await asyncio.sleep(delay)
+    # -------------------------------------------------
+
+
+async def send_statistics(client):
+    global total_reported_duplicates, total_duplicate_messages, total_deleted_messages, total_moved_messages, start_time
+    
+    if CHANNEL_ID_LOG == 0:
+        print("⚠️ تم تجاهل إرسال الإحصائيات: CHANNEL_ID_LOG غير متاح أو غير صحيح.")
+        return
 
     total_time = time.time() - start_time
-    print(f"\n🏁 اكتملت العملية بنجاح!")
-    print(f"🔍 إجمالي الملفات التي تم العثور عليها: {total_files_found}")
-    print(f"⏱️ الوقت الكلي المستغرق: {total_time:.2f} ثانية.")
+    avg_time = sum(t[1] for t in processing_times) / len(processing_times) if processing_times else 0
+    slowest_tasks = sorted(processing_times, key=lambda x: x[1], reverse=True)[:3]
+    slowest_tasks_str = "\n    ".join([f"- {name}: {duration:.2f}s" for name, duration in slowest_tasks]) if slowest_tasks else "لا يوجد"
+    
+    report = f"""📊 **تقرير الأداء النهائي** 📊
+----------------------------
+• مجموعات التكرار التي تم الإبلاغ عنها: `{total_reported_duplicates}` 📝
+• إجمالي الرسائل المكررة التي تم تحديدها: `{total_duplicate_messages}` 🔎 (باستثناء الأصول)
+• الرسائل المنقولة إلى قناة الوجهة: `{total_moved_messages}` ➡️
+• إجمالي الرسائل المحذوفة من القناة الأصلية: `{total_deleted_messages}` 🗑️
+• الوقت الكلي للعملية: `{total_time:.2f}` ثانية ⏱
+• متوسط وقت المهمة: `{avg_time:.2f}` ثانية ⚡
+• المهام الأبطأ:
+    {slowest_tasks_str}"""
+    try:
+        await client.send_message(CHANNEL_ID_LOG, report, parse_mode=ParseMode.MARKDOWN)
+        print("✅ تم إرسال التقرير الإحصائي النهائي.")
+    except Exception as e: print(f"⚠️ خطأ أثناء إرسال التقرير النهائي: {e}")
+
+async def find_and_report_duplicates(client, channel_id):
+    global start_time # استخدام المتغير العام
+    start_time = time.time()
+    print("🔍 بدأ تحليل الملفات في القناة (اعتمادًا على حجم الملف فقط)...")
+    file_dict = await collect_files(client, channel_id, FIRST_MSG_ID)
+    print("⚡ بدأ إعداد تقارير الروابط للملفات المكررة وحذفها ونقلها...")
+
+    duplicate_groups_to_report = [(file_size, msg_ids) for file_size, msg_ids in file_dict.items() if len(msg_ids) > 1]
+    print(f"سيتم معالجة {len(duplicate_groups_to_report)} مجموعة من التكرارات (نقل/حذف/تقرير).")
+
+    for file_size, msg_ids in duplicate_groups_to_report:
+        await send_duplicate_links_report(client, channel_id, CHANNEL_ID_LOG, msg_ids)
+    
+    await send_statistics(client)
+    print(f"🏁 اكتملت العملية في {time.time()-start_time:.2f} ثانية.")
 
 # ----------------- الدالة الرئيسية -----------------
 
 async def main():
-    # استخدام `with Client(...)` يضمن إغلاق الجلسة بشكل آمن
-    async with Client("my_account_session", api_id=API_ID, api_hash=API_HASH, session_string=SESSION) as client:
-        user = await client.get_me()
-        print(f"🚀 تم تسجيل الدخول بنجاح كـ: {user.first_name}")
-
-        print("\n💡 جارٍ التحقق من الوصول إلى القناة المصدر...")
+    # سيقوم Pyrogram بإنشاء/تحميل الجلسة تلقائياً بناءً على اسم الملف المحدد
+    async with Client(SESSION_NAME, api_id=API_ID, api_hash=API_HASH) as client:
+        # هذه الخطوة مهمة لكي يكتمل Pyrogram عملية إنشاء الجلسة لأول مرة (رقم الهاتف/رمز التحقق)
         try:
-            # التحقق من أن CHANNEL_ID هو قناة صالحة يمكن الوصول إليها
-            await client.get_chat(CHANNEL_ID)
-            print(f"✅ تم التحقق من الوصول إلى القناة ({CHANNEL_ID}) بنجاح.")
+            user = await client.get_me()
+            print(f"🚀 اتصال ناجح بالتيليجرام عبر Pyrogram كـ: {user.first_name}")
         except Exception as e:
-            print(f"❌ خطأ فادح: لا يمكن الوصول إلى القناة المحددة في `CHANNEL_ID`.")
-            print(f"تفاصيل الخطأ: {e}")
+            print(f"❌ خطأ فادح أثناء الاتصال بـ Telegram. ربما معلومات الجلسة غير صحيحة أو بحاجة للتحديث: {e}")
             return
 
-        await process_channel(client, CHANNEL_ID)
+
+        print("💡 جارٍ التحقق من الوصول إلى القنوات...")
+        try:
+            # التحقق من أن CHANNEL_ID هو قناة مصدر صالحة
+            if CHANNEL_ID == 0:
+                raise ValueError("CHANNEL_ID لم يتم تعيينه بشكل صحيح. يجب أن يكون معرف قناة صالحًا.")
+            await client.get_chat(CHANNEL_ID)
+            print(f"✅ تم التحقق من الوصول إلى القناة المصدر ({CHANNEL_ID}) بنجاح.")
+
+            # التحقق من أن CHANNEL_ID_LOG هو قناة وجهة صالحة إذا لم يكن 0
+            if CHANNEL_ID_LOG != 0:
+                await client.get_chat(CHANNEL_ID_LOG)
+                print(f"✅ تم التحقق من الوصول إلى قناة السجلات ({CHANNEL_ID_LOG}) بنجاح.")
+            else:
+                print("ℹ️ CHANNEL_ID_LOG لم يتم تعيينه. لن يتم إرسال أي تقارير أو إحصائيات إلى قناة.")
+        except Exception as e:
+            error_message = f"❌ **خطأ فادح: لا يمكن الوصول إلى إحدى القنوات أو لم يتم تعيينها بشكل صحيح.**\n\n**تفاصيل الخطأ:** `{e}`\n\n`يرجى التحقق من معرفات القنوات والإذن.`"
+            print(error_message)
+            try:
+                # محاولة إرسال الخطأ إلى قناة السجلات حتى لو كانت هي المشكلة
+                if CHANNEL_ID_LOG != 0:
+                    await client.send_message(CHANNEL_ID_LOG, error_message, parse_mode=ParseMode.MARKDOWN)
+            except Exception as send_e:
+                print(f"⚠️ فشل في إرسال رسالة الخطأ إلى قناة السجلات: {send_e}")
+            return
+
+        # --- رسالة بداية المعالجة ---
+        start_message = "✨ **بدء عملية فحص التكرار والنقل والحذف والتبليغ!**\n\n`جاري تحليل الملفات في القناة والبحث عن المكررات، نقلها، حذفها، وتقديم التقارير.`"
+        if CHANNEL_ID_LOG != 0:
+            try:
+                await client.send_message(CHANNEL_ID_LOG, start_message, parse_mode=ParseMode.MARKDOWN)
+                print("✅ تم إرسال رسالة بداية المعالجة.")
+            except Exception as e:
+                print(f"⚠️ فشل في إرسال رسالة البداية إلى قناة السجلات: {e}")
+        else:
+            print("ℹ️ لن يتم إرسال رسالة البداية لعدم توفر CHANNEL_ID_LOG.")
+        # ---------------------------
+
+        await find_and_report_duplicates(client, CHANNEL_ID)
+
+        # --- رسالة نهاية المعالجة ---
+        end_message = "🎉 **اكتملت عملية فحص التكرار والنقل والحذف والتبليغ!**\n\n`تم فحص جميع الملفات المطلوبة وإرسال التقارير، ونقل النسخ المحددة وحذف المكررات.`"
+        if CHANNEL_ID_LOG != 0:
+            try:
+                await client.send_message(CHANNEL_ID_LOG, end_message, parse_mode=ParseMode.MARKDOWN)
+                print("✅ تم إرسال رسالة نهاية المعالجة.")
+            except Exception as e:
+                print(f"⚠️ فشل في إرسال رسالة النهاية إلى قناة السجلات: {e}")
+        else:
+            print("ℹ️ لن يتم إرسال رسالة النهاية لعدم توفر CHANNEL_ID_LOG.")
+        # ---------------------------
 
 if __name__ == '__main__':
-    # التأكد من وجود المتغيرات الأساسية
-    if not all([API_ID, API_HASH, SESSION, CHANNEL_ID]):
-        print("❌ خطأ: يرجى التأكد من تعيين كل من API_ID, API_HASH, SESSION, CHANNEL_ID في ملف .env")
+    print("🔹 بدء التشغيل...")
+    # التأكد من وجود المتغيرات الأساسية المطلوبة لإنشاء الجلسة
+    if not all([API_ID, API_HASH, CHANNEL_ID]):
+        print("❌ خطأ: يرجى التأكد من تعيين كل من API_ID, API_HASH, CHANNEL_ID في ملف .env")
     else:
-        print("🔹 بدء تشغيل السكربت...")
         asyncio.run(main())
