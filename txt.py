@@ -1,233 +1,170 @@
-# متغير لتخزين آخر قيمة تأخير مستخدمة (لم تعد تستخدم ولكن أبقيها لتكون مرجعاً)
-prev_delay = None
-
-import random
-import asyncio
 import os
-import time
+import asyncio
+from datetime import datetime
+from collections import defaultdict
+import logging
 
-from pyrogram import Client
-from pyrogram.enums import ParseMode # قد لا نحتاجها الآن ولكن أبقيها
-from pyrogram.errors import FloodWait, MessageDeleteForbidden, RPCError # لم تعد تستخدم ولكن أبقيها
 from dotenv import load_dotenv
+from pyrogram import Client
+from pyrogram.errors import FloodWait
 
-# هذه الدالة لم تعد تستخدم لأننا لن نرسل تقارير فورية بعد الآن
-def get_random_delay(min_delay=5, max_delay=30, min_diff=5):
-    """
-    تُولد قيمة تأخير عشوائية بين min_delay و max_delay.
-    إذا كانت القيمة الجديدة قريبة جدًا (فرق أقل من min_diff) من القيمة السابقة،
-    يتم إعادة التوليد.
-    """
-    global prev_delay
-    delay = random.randint(min_delay, max_delay)
-    # حلقة While loop لضمان أن التأخير الجديد ليس قريبًا جدًا من السابق
-    while prev_delay is not None and abs(delay - prev_delay) < min_diff:
-        delay = random.randint(min_delay, max_delay)
-    prev_delay = delay
-    return delay
+# إعداد تسجيل الأخطاء في الطرفية
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-# تحميل إعدادات البيئة
+# تحميل المتغيرات من ملف .env
 load_dotenv()
 
-# إعدادات تيليجرام
-API_ID = int(os.getenv('API_ID', 0))
-API_HASH = os.getenv('API_HASH')
-SESSION = os.getenv('SESSION')
-CHANNEL_ID = int(os.getenv('CHANNEL_ID', 0)) # القناة الأصلية (المصدر)
-# CHANNEL_ID_LOG لم تعد تستخدم لإرسال التقارير، لكن قد تظل مفيدة لرسائل البدء/النهاية
-CHANNEL_ID_LOG = int(os.getenv('CHANNEL_ID_LOG', 0)) 
-FIRST_MSG_ID = int(os.getenv('FIRST_MSG_ID', 0))
-BOT_TOKEN = os.getenv('BOT_TOKEN') # <--- أضف هذا السطر
+API_ID = os.getenv("API_ID")
+API_HASH = os.getenv("API_HASH")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# إحصائيات وأداء (تعريف المتغيرات العامة)
-total_reported_duplicates = 0 # هذا سيعد مجموعات التكرار المكتشفة
-total_duplicate_messages_found = 0 # هذا سيعد إجمالي الرسائل المكررة المكتشفة
-processing_times = []
-start_time = None
+try:
+    CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
+    CHANNEL_ID_LOG = int(os.getenv("CHANNEL_ID_LOG"))
+    FIRST_MSG_ID = int(os.getenv("FIRST_MSG_ID"))
+except (TypeError, ValueError):
+    logger.error("خطأ: تأكد من أن CHANNEL_ID, CHANNEL_ID_LOG, FIRST_MSG_ID أرقام صحيحة في ملف .env")
+    exit()
 
-# متغير عالمي لتخزين التقرير النهائي
-final_report_content = []
+# إنشاء عميل Pyrogram باستخدام توكن البوت
+# "duplicate_finder_bot" هو اسم ملف الجلسة الذي سيتم إنشاؤه
+app = Client(
+    "duplicate_finder_bot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN
+)
 
-# ----------------- الدوال -----------------
-
-# دالة delete_message لم تعد تستخدم
-# async def delete_message(client, chat_id, message_id):
-#     """تحذف رسالة من قناة مع معالجة الأخطاء."""
-#     # ... (كود حذف الرسالة الأصلي) ...
-
-async def collect_files(client, channel_id, first_msg_id):
-    global processing_times # التصريح باستخدام المتغير العام
-    file_dict = {}
-    start_collect = time.time()
-
-    # تأمين الوصول إلى file_dict لتجنب مشاكل التزامن
-    lock = asyncio.Lock()
-
-    async def process_message(message):
-        # التحقق من أن الرسالة ليست مجموعة ألبومات
-        if message.media_group_id:
-            return # نتجاهل رسائل الألبومات لتجنب التكرار في الفحص
-
-        media = message.document or message.video or message.audio or message.photo # أضفنا message.photo
-        if media and hasattr(media, 'file_size'):
-            file_size = media.file_size
-            async with lock: # استخدام القفل هنا
-                if file_size in file_dict:
-                    file_dict[file_size].append(message.id)
-                else:
-                    file_dict[file_size] = [message.id]
-
-    tasks = []
-    print("جاري مسح الرسائل في القناة...")
+async def find_duplicates():
+    """
+    الوظيفة الرئيسية لفحص القناة، تحديد الملفات المكررة، وتوليد التقرير.
+    """
+    files_by_size = defaultdict(list)
     messages_scanned = 0
-    # استخدام `await client.get_chat_history` للحصول على كائن مكرر
-    async for message in client.get_chat_history(channel_id):
-        if message.id <= first_msg_id: break
-        tasks.append(process_message(message))
-        messages_scanned += 1
-        # معالجة المهام على دفعات لتجنب استهلاك الذاكرة بشكل مفرط
-        if messages_scanned % 500 == 0:
-            print(f"تم مسح {messages_scanned} رسالة حتى الآن...")
-            await asyncio.gather(*tasks)
-            tasks = [] # إعادة تعيين قائمة المهام
-    if tasks:
-        await asyncio.gather(*tasks) # معالجة أي مهام متبقية
+    files_found = 0
+    start_time = datetime.now()
 
-    processing_times.append(('collect_files', time.time() - start_collect))
-    return file_dict
-
-# هذه الدالة تم تعديلها لتجهيز التقرير للملف بدلاً من إرساله لتيليجرام
-async def prepare_duplicate_report_entry(source_chat_id, message_ids):
-    global total_reported_duplicates, total_duplicate_messages_found, final_report_content
-    if not message_ids or len(message_ids) < 2:
-        return # لا يوجد تكرار إذا كانت الرسائل أقل من 2
-
-    message_ids.sort()
-    original_msg_id = message_ids[0]
-    duplicate_msg_ids = message_ids[1:] # جميع الرسائل ما عدا الأولى تعتبر مكررة
-
-    total_reported_duplicates += 1
-    total_duplicate_messages_found += len(duplicate_msg_ids)
-
-    source_channel_id_for_link = str(source_chat_id).replace("-100", "")
-
-    # بناء جزء التقرير لهذه المجموعة من التكرارات
-    report_entry = f"--- مجموعة تكرار # {total_reported_duplicates} ---\n"
-    report_entry += f"الرسالة الأصلية (غير مكررة): https://t.me/c/{source_channel_id_for_link}/{original_msg_id}\n"
-    report_entry += "الرسائل المكررة:\n"
-    for msg_id in duplicate_msg_ids:
-        report_entry += f"  - https://t.me/c/{source_channel_id_for_link}/{msg_id}\n"
-    report_entry += "\n" # سطر فارغ للفصل بين المجموعات
-
-    final_report_content.append(report_entry)
-    print(f"تم إضافة تقرير عن مجموعة تكرار ({len(message_ids)} رسالة) إلى المحتوى النهائي.")
-
-
-async def send_statistics(client):
-    global total_reported_duplicates, total_duplicate_messages_found, start_time, final_report_content
-    total_time = time.time() - start_time
-    avg_time = sum(t[1] for t in processing_times) / len(processing_times) if processing_times else 0
-    slowest_tasks = sorted(processing_times, key=lambda x: x[1], reverse=True)[:3]
-    slowest_tasks_str = "\n    ".join([f"- {name}: {duration:.2f}s" for name, duration in slowest_tasks]) if slowest_tasks else "لا يوجد"
-    
-    # بناء التقرير الإحصائي الذي سيضاف إلى الملف النصي
-    stats_report = f"""📊 تقرير الأداء النهائي 📊
-----------------------------
-• مجموعات التكرار التي تم اكتشافها: {total_reported_duplicates}
-• إجمالي الرسائل المكررة التي تم تحديدها: {total_duplicate_messages_found} (باستثناء الأصول)
-• الوقت الكلي للعملية: {total_time:.2f} ثانية
-• متوسط وقت المهمة: {avg_time:.2f} ثانية
-• المهام الأبطأ:
-    {slowest_tasks_str}
-----------------------------
-"""
-    final_report_content.insert(0, stats_report) # أضف التقرير الإحصائي في بداية الملف
-
-    # كتابة التقرير بالكامل إلى ملف نصي
-    report_filename = f"duplicate_files_report_{time.strftime('%Y%m%d_%H%M%S')}.txt"
-    try:
-        with open(report_filename, "w", encoding="utf-8") as f:
-            f.write("".join(final_report_content))
-        print(f"✅ تم حفظ التقرير الشامل في الملف: {report_filename}")
-    except Exception as e:
-        print(f"⚠️ خطأ أثناء حفظ التقرير في الملف: {e}")
-
-    # (اختياري) يمكنك إرسال إحصائيات موجزة إلى قناة السجلات إذا أردت
-    # try:
-    #     if CHANNEL_ID_LOG != 0:
-    #         await client.send_message(CHANNEL_ID_LOG, stats_report, parse_mode=ParseMode.MARKDOWN)
-    #         print("✅ تم إرسال التقرير الإحصائي الموجز إلى قناة السجلات.")
-    # except Exception as e:
-    #     print(f"⚠️ خطأ أثناء إرسال التقرير الإحصائي الموجز إلى قناة السجلات: {e}")
-
-
-async def find_and_report_duplicates(client, channel_id):
-    global start_time # استخدام المتغير العام
-    start_time = time.time()
-    print("🔍 بدأ تحليل الملفات في القناة (اعتمادًا على حجم الملف فقط)...")
-    file_dict = await collect_files(client, channel_id, FIRST_MSG_ID)
-    print("⚡ بدأ إعداد تقارير الروابط للملفات المكررة...")
-
-    duplicate_groups_to_report = [(file_size, msg_ids) for file_size, msg_ids in file_dict.items() if len(msg_ids) > 1]
-    print(f"سيتم معالجة {len(duplicate_groups_to_report)} مجموعة من التكرارات.")
-
-    for file_size, msg_ids in duplicate_groups_to_report:
-        await prepare_duplicate_report_entry(channel_id, msg_ids)
-    
-    await send_statistics(client) # هذه الدالة الآن تقوم بحفظ التقرير إلى ملف
-
-    print(f"🏁 اكتملت العملية في {time.time()-start_time:.2f} ثانية.")
-
-# ----------------- الدالة الرئيسية -----------------
-
-async def main():
-    # استخدام توكن البوت بدلاً من سلسلة الجلسة
-    async with Client(
-        "my_bot_session", # هذا الاسم يستخدم لتخزين معلومات الكاش، ليس الجلسة
-        api_id=API_ID,
-        api_hash=API_HASH,
-        bot_token=BOT_TOKEN # <--- هذا هو التغيير الرئيسي هنا
-    ) as client:
-        print("🚀 اتصال ناجح بالتيليجرام عبر Pyrogram.")
-
-        print("💡 جارٍ التحقق من الوصول إلى القنوات (فقط للتحقق من المعرفات)...")
+    async with app:
         try:
-            # التحقق من أن CHANNEL_ID_LOG هو معرف صالح (وإن لم نعد نستخدمه لإرسال التقارير الرئيسية)
-            if CHANNEL_ID_LOG == 0:
-                print("⚠️ تنبيه: CHANNEL_ID_LOG غير محدد. لن يتم إرسال رسائل بدء/نهاية المعالجة إلى Telegram.")
-            else:
-                await client.get_chat(CHANNEL_ID_LOG) # تحقق فقط من صلاحيته
+            logger.info("تم تسجيل دخول البوت بنجاح.")
+            await app.send_message(CHANNEL_ID_LOG, "⏳ جارٍ بدء عملية فحص الملفات المكررة...")
 
-            await client.get_chat(CHANNEL_ID)
-            print("✅ تم التحقق من الوصول إلى القنوات بنجاح.")
+            # الحصول على معلومات القناة
+            chat = await app.get_chat(CHANNEL_ID)
+            logger.info(f"بدء الفحص في القناة: '{chat.title}'")
+
+            # الدوران على كل الرسائل في القناة
+            async for message in app.get_chat_history(CHANNEL_ID):
+                # التوقف عند الوصول إلى رسالة أقدم من الرسالة المحددة
+                if message.id < FIRST_MSG_ID:
+                    logger.info(f"تم الوصول إلى الرسالة المحددة FIRST_MSG_ID ({FIRST_MSG_ID}). إيقاف الفحص.")
+                    break
+                
+                messages_scanned += 1
+                if messages_scanned % 100 == 0:
+                    logger.info(f"تم فحص {messages_scanned} رسالة...")
+
+                # استخراج الملف وحجمه (يدعم أنواع متعددة)
+                file_info = None
+                if message.document:
+                    file_info = message.document
+                elif message.video:
+                    file_info = message.video
+                elif message.audio:
+                    file_info = message.audio
+                elif message.photo:
+                    file_info = message.photo # يأخذ أكبر حجم للصورة
+
+                if file_info and hasattr(file_info, 'file_size'):
+                    files_found += 1
+                    file_size = file_info.file_size
+                    # تخزين رابط الرسالة ورقمها للفرز لاحقًا
+                    files_by_size[file_size].append((message.id, message.link))
+
+        except FloodWait as e:
+            logger.warning(f"تم تقييد الطلبات (FloodWait). الانتظار لمدة {e.value} ثانية...")
+            await asyncio.sleep(e.value)
         except Exception as e:
-            print(f"❌ خطأ فادح: لا يمكن الوصول إلى إحدى القنوات أو لم يتم تعيينها بشكل صحيح.")
-            print(f"تفاصيل الخطأ: {e}")
-            # لم نعد نرسل رسالة خطأ إلى قناة السجلات لمنع حدوث مشاكل في حال كان CHANNEL_ID_LOG هو المشكلة
-            return
+            error_message = f"حدث خطأ فادح أثناء الفحص: {e}"
+            logger.error(error_message)
+            await app.send_message(CHANNEL_ID_LOG, f"❌ حدث خطأ وتوقفت العملية:\n`{e}`")
+            return # إيقاف التنفيذ عند حدوث خطأ فادح
 
-        # --- رسالة بداية المعالجة (اختيارية، يمكن إرسالها إلى قناة السجلات إذا كانت موجودة) ---
-        if CHANNEL_ID_LOG != 0:
-            start_message = "✨ **بدء عملية فحص التكرار!**\n\n`جاري تحليل الملفات في القناة والبحث عن المكررات، وسيتم حفظ التقرير في ملف نصي محلي.`"
-            try:
-                await client.send_message(CHANNEL_ID_LOG, start_message, parse_mode=ParseMode.MARKDOWN)
-                print("✅ تم إرسال رسالة بداية المعالجة.")
-            except Exception as e:
-                print(f"⚠️ فشل في إرسال رسالة البداية إلى قناة السجلات: {e}")
-        # ----------------------------------------------------------------------------------
+    logger.info("انتهى الفحص. جارٍ توليد التقرير...")
 
-        await find_and_report_duplicates(client, CHANNEL_ID)
+    # --- توليد التقرير ---
+    
+    # فلترة النتائج للحصول فقط على الملفات التي لها تكرارات
+    duplicate_groups = {size: messages for size, messages in files_by_size.items() if len(messages) > 1}
+    
+    # إنشاء اسم ملف التقرير مع طابع زمني
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    report_filename = f"report_duplicates_{timestamp}.txt"
+    
+    total_duplicate_files = sum(len(messages) - 1 for messages in duplicate_groups.values())
+    
+    with open(report_filename, "w", encoding="utf-8") as f:
+        f.write("تقرير الملفات المكررة في قناة تليجرام\n")
+        f.write("="*40 + "\n\n")
+        
+        # قسم الإحصائيات العامة
+        f.write("📊 إحصائيات عامة:\n")
+        f.write("-" * 20 + "\n")
+        f.write(f"تاريخ إنشاء التقرير: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"مدة الفحص: {datetime.now() - start_time}\n")
+        f.write(f"إجمالي الرسائل التي تم فحصها: {messages_scanned}\n")
+        f.write(f"إجمالي الملفات التي تم العثور عليها: {files_found}\n")
+        f.write(f"عدد مجموعات الملفات المكررة: {len(duplicate_groups)}\n")
+        f.write(f"إجمالي عدد النسخ المكررة: {total_duplicate_files}\n\n")
+        
+        f.write("="*40 + "\n\n")
+        
+        if not duplicate_groups:
+            f.write("🎉 لم يتم العثور على أي ملفات مكررة بناءً على حجم الملف.\n")
+        else:
+            f.write("🔍 تفاصيل المجموعات المكررة:\n\n")
+            # فرز المجموعات حسب حجم الملف (من الأكبر للأصغر)
+            sorted_groups = sorted(duplicate_groups.items(), key=lambda item: item[0], reverse=True)
 
-        # --- رسالة نهاية المعالجة (اختيارية، يمكن إرسالها إلى قناة السجلات) ---
-        if CHANNEL_ID_LOG != 0:
-            end_message = "🎉 **اكتملت عملية فحص التكرار!**\n\n`تم فحص جميع الملفات المطلوبة وحفظ التقرير في ملف نصي محلي.`"
-            try:
-                await client.send_message(CHANNEL_ID_LOG, end_message, parse_mode=ParseMode.MARKDOWN)
-                print("✅ تم إرسال رسالة نهاية المعالجة.")
-            except Exception as e:
-                print(f"⚠️ فشل في إرسال رسالة النهاية إلى قناة السجلات: {e}")
-        # --------------------------------------------------------------------
+            for i, (size, messages) in enumerate(sorted_groups, 1):
+                # فرز الرسائل داخل كل مجموعة حسب رقم الرسالة (الأقدم أولاً)
+                messages.sort(key=lambda x: x[0])
+                
+                original_msg_id, original_link = messages[0]
+                duplicate_links = [link for msg_id, link in messages[1:]]
+                
+                f.write(f"--- المجموعة رقم {i} (حجم الملف: {size / 1024 / 1024:.2f} MB) ---\n")
+                f.write(f"الرسالة الأصلية (الأقدم): {original_link}\n")
+                f.write(f"النسخ المكررة ({len(duplicate_links)}):\n")
+                for dup_link in duplicate_links:
+                    f.write(f"  - {dup_link}\n")
+                f.write("\n")
+    
+    logger.info(f"تم حفظ التقرير بنجاح في الملف: {report_filename}")
+    
+    # إرسال إشعار الانتهاء
+    try:
+        await app.start()
+        completion_message = (
+            f"✅ اكتملت عملية الفحص بنجاح!\n\n"
+            f"📄 تم حفظ التقرير محلياً باسم:\n`{report_filename}`\n\n"
+            f"** ملخص النتائج:**\n"
+            f"- الرسائل المفحوصة: {messages_scanned}\n"
+            f"- مجموعات مكررة: {len(duplicate_groups)}\n"
+            f"- إجمالي التكرارات: {total_duplicate_files}"
+        )
+        await app.send_message(CHANNEL_ID_LOG, completion_message)
+        # يمكنك إرسال التقرير نفسه إذا كان حجمه صغيراً
+        if os.path.getsize(report_filename) < 50 * 1024 * 1024: # 50 MB
+             await app.send_document(CHANNEL_ID_LOG, report_filename, caption="📄 مرفق تقرير التفاصيل")
+        await app.stop()
+    except Exception as e:
+        logger.error(f"حدث خطأ أثناء إرسال إشعار الانتهاء: {e}")
 
-if __name__ == '__main__':
-    print("🔹 بدء التشغيل...")
-    asyncio.run(main())
+
+if __name__ == "__main__":
+    logger.info("بدء تشغيل سكربت البحث عن التكرارات...")
+    # استخدام asyncio.run لتشغيل الدالة غير المتزامنة
+    asyncio.run(find_duplicates())
+    logger.info("انتهى تنفيذ السكربت.")
