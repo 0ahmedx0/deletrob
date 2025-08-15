@@ -95,6 +95,7 @@ async def scan_channel(channel_id: int, first_msg_id: int = 1, file_type: str = 
     except Exception as e:
         return None, None, None, f"[!] خطأ أثناء الفحص: {repr(e)}"
 
+    # تصفية مجموعات التكرار
     duplicate_groups = {size: msgs for size, msgs in duplicates.items() if len(msgs) > 1}
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -120,10 +121,13 @@ async def scan_channel(channel_id: int, first_msg_id: int = 1, file_type: str = 
         f.write(f"📦 أكبر ملف مكرر: {human_size(max_size)}\n")
         f.write(f"📦 أصغر ملف مكرر: {human_size(min_size)}\n")
         f.write("="*60 + "\n\n")
+
         for size, msgs in sorted(duplicate_groups.items(), key=lambda x:x[0], reverse=True):
             f.write(f"📦 الحجم: {human_size(size)} ({size} B)\n")
-            f.write(f"🔗 الأصل: https://t.me/c/{str(channel_id)[4:]}/{msgs[0].id}\n")
-            for dup in msgs[1:]:
+            # msgs مرتبة من الأحدث للأقدم، نحتفظ بالأقدم (آخر رسالة)
+            original = msgs[-1]
+            f.write(f"🔗 الأصل: https://t.me/c/{str(channel_id)[4:]}/{original.id}\n")
+            for dup in msgs[:-1]:  # حذف الأحدث
                 f.write(f"   ↳ مكرر: https://t.me/c/{str(channel_id)[4:]}/{dup.id}\n")
                 delete_ids.append(dup.id)
             f.write("\n")
