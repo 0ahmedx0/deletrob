@@ -1,25 +1,29 @@
 import os
 import asyncio
 from datetime import datetime
-from telethon import TelegramClient, events
+from telethon import TelegramClient
 from telethon.errors import FloodWaitError
 from dotenv import load_dotenv
 
-# تحميل المتغيرات من ملف .env
+# تحميل المتغيرات من .env
 load_dotenv()
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
 FIRST_MSG_ID = int(os.getenv("FIRST_MSG_ID"))
+MY_CHAT_ID = int(os.getenv("MY_CHAT_ID"))  # معرفك من @userinfobot
 
-# إنشاء العميل
-client = TelegramClient('bot_session', API_ID, API_HASH).start(bot_token=BOT_TOKEN)
+# جلسة حساب المستخدم (للوصول للقناة)
+user_client = TelegramClient('user_session', API_ID, API_HASH)
+
+# جلسة البوت (للإشعارات)
+bot_client = TelegramClient('bot_session', API_ID, API_HASH).start(bot_token=BOT_TOKEN)
 
 async def send_notification(text: str):
-    """إرسال إشعار إلى دردشة البوت نفسه"""
+    """إرسال إشعار عبر البوت إلى محادثتك"""
     try:
-        await client.send_message('me', text)
+        await bot_client.send_message(MY_CHAT_ID, text)
     except Exception as e:
         print(f"[!] خطأ في إرسال الإشعار: {e}")
 
@@ -29,7 +33,7 @@ async def main():
     duplicates = {}  # {file_size: [(msg_id, link), ...]}
 
     try:
-        async for msg in client.iter_messages(CHANNEL_ID, min_id=FIRST_MSG_ID-1):
+        async for msg in user_client.iter_messages(CHANNEL_ID, min_id=FIRST_MSG_ID-1):
             if msg.file and msg.file.size:
                 file_size = msg.file.size
                 link = f"https://t.me/c/{str(CHANNEL_ID)[4:]}/{msg.id}"
@@ -41,7 +45,7 @@ async def main():
     except Exception as e:
         print(f"[!] خطأ أثناء الفحص: {e}")
 
-    # تصفية التكرارات الحقيقية (أكثر من رسالة لنفس الحجم)
+    # تصفية المجموعات المكررة
     duplicate_groups = {size: msgs for size, msgs in duplicates.items() if len(msgs) > 1}
 
     # إنشاء التقرير
@@ -62,8 +66,17 @@ async def main():
             f.write("\n")
 
     print(f"[✓] تم إنشاء التقرير: {report_name}")
-    await send_notification(f"✅ تم الانتهاء من الفحص.\n📄 التقرير محفوظ باسم: {report_name}")
+
+    # إرسال إشعار الانتهاء مع التقرير
+    try:
+        await bot_client.send_file(MY_CHAT_ID, report_name, caption="✅ تم الانتهاء من الفحص")
+    except Exception as e:
+        print(f"[!] خطأ في إرسال التقرير: {e}")
 
 if __name__ == "__main__":
-    with client:
-        client.loop.run_until_complete(main())
+    async def runner():
+        await user_client.start()  # تسجيل دخول المستخدم
+        await main()
+
+    with bot_client:
+        bot_client.loop.run_until_complete(runner())
