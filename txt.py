@@ -105,4 +105,10 @@ async def main():
     await bot_client.run_until_disconnected()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    async def runner():
+        await user_client.start()
+        await bot_client.start()
+        print("[✓] البوت جاهز لاستقبال الأوامر.")
+        await asyncio.Future()  # علشان يظل شغال للأبد
+
+    user_client.loop.run_until_complete(runner())
