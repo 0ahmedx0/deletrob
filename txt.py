@@ -133,24 +133,31 @@ async def scan_channel(channel_id: int, first_msg_id: int = 1, file_type: str = 
 # -------------------
 # نسخ الوسائط المكررة إلى قناة الوجهة (ألبومات من 10 صور/فيديو/صوتية فقط)
 # -------------------
+# -------------------
+# نسخ الوسائط المكررة إلى قناة الوجهة (ألبومات من 10 صور/فيديو/صوتية فقط، حسب ترتيب الرسائل)
+# -------------------
 async def backup_duplicates(channel_id, delete_ids, dest_channel_id):
     batch_size = 10
-    for i in range(0, len(delete_ids), batch_size):
-        batch_ids = delete_ids[i:i+batch_size]
+    # ترتيب الرسائل حسب ID تصاعدياً
+    sorted_ids = sorted(delete_ids)
+
+    for i in range(0, len(sorted_ids), batch_size):
+        batch_ids = sorted_ids[i:i+batch_size]
         messages_to_send = []
         for msg_id in batch_ids:
             msg = await user_client.get_messages(channel_id, ids=msg_id)
+            # إضافة فقط الصور والفيديو والصوتيات
             if getattr(msg, "photo", None) or getattr(msg, "video", None):
                 messages_to_send.append(msg)
-            # المستندات لا تُضاف للألبوم
         if messages_to_send:
             try:
+                # إرسال الألبوم بالكامل دفعة واحدة
                 await user_client.send_file(dest_channel_id, messages_to_send, silent=True)
                 print(f"📦 تم إرسال ألبوم {i//batch_size + 1} يحتوي على {len(messages_to_send)} ملف/صورة/فيديو/صوتية")
             except Exception as e:
                 print(f"[!] خطأ أثناء النسخ الاحتياطي: {repr(e)}")
         # تأخير 5 ثوانٍ قبل الألبوم التالي
-        await asyncio.sleep(5)
+        await asyncio.sleep(10)
 
 # -------------------
 # حذف بالدفعات مع تحديث تقدم
