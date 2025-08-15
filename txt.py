@@ -37,6 +37,7 @@ CHANNEL_ID = int(os.getenv('CHANNEL_ID', 0)) # القناة الأصلية (ال
 # CHANNEL_ID_LOG لم تعد تستخدم لإرسال التقارير، لكن قد تظل مفيدة لرسائل البدء/النهاية
 CHANNEL_ID_LOG = int(os.getenv('CHANNEL_ID_LOG', 0)) 
 FIRST_MSG_ID = int(os.getenv('FIRST_MSG_ID', 0))
+BOT_TOKEN = os.getenv('BOT_TOKEN') # <--- أضف هذا السطر
 
 # إحصائيات وأداء (تعريف المتغيرات العامة)
 total_reported_duplicates = 0 # هذا سيعد مجموعات التكرار المكتشفة
