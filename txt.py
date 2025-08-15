@@ -150,20 +150,19 @@ async def handler(event):
         await event.reply("❌ أرسل: <CHANNEL_ID> [FIRST_MSG_ID] [TYPE] أو delete")
         return
 
-    cmd = parts[0]
-    if cmd == "/cancel":
+    if parts[0] == "/cancel":
         cancel_delete = True
         await event.reply("❌ تم إلغاء عملية الحذف.")
         return
 
-    if cmd == "/stats":
+    if parts[0] == "/stats":
         if last_report:
             await event.reply(file=last_report, message="📊 آخر تقرير:")
         else:
             await event.reply("❌ لا يوجد تقرير سابق.")
         return
 
-    # scan أو scan_delete عن طريق النوع الجديد
+    # صيغة جديدة: CHANNEL_ID FIRST_MSG_ID TYPE أو delete
     try:
         raw_id = parts[0]
         channel_id = int(raw_id)
@@ -210,5 +209,32 @@ async def main():
 
 2️⃣ <CHANNEL_ID> [FIRST_MSG_ID] delete
    🔹 فحص وحذف الرسائل المكررة
+   🔹 مثال: 1234567890
+2️⃣ <CHANNEL_ID> [FIRST_MSG_ID] delete
+   🔹 فحص وحذف الرسائل المكررة
    🔹 مثال: 1234567890 5 delete
 
+3️⃣ /stats
+   🔹 عرض آخر تقرير تم إنشاؤه
+
+4️⃣ /cancel
+   🔹 إلغاء عملية الحذف إذا كانت قيد التنفيذ
+
+⚙️ TYPE يمكن أن يكون: all | document | video | audio | photo
+
+📌 كل الإشعارات، التقدم، والتقارير تُرسل هنا في هذه المحادثة
+"""
+    await bot_client.send_message(MY_CHAT_ID, "[✓] البوت جاهز لاستقبال الأوامر.")
+    await bot_client.send_message(MY_CHAT_ID, welcome_text)
+
+    await asyncio.Future()  # يبقى البوت شغال للأبد
+
+# -------------------
+# نقطة الدخول
+# -------------------
+if __name__ == "__main__":
+    # تشغيل البوت مع جلسة المستخدم
+    try:
+        user_client.loop.run_until_complete(main())
+    except KeyboardInterrupt:
+        print("✅ تم إيقاف البوت يدوياً")
