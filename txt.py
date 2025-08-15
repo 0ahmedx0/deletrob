@@ -273,6 +273,20 @@ async def handler(event):
     # حفظ آخر تقرير وإرساله
     last_report = report
     await bot_client.send_file(MY_CHAT_ID, report, caption="✅ تم الانتهاء من الفحص — تقرير مفصل:")
+    # -------------------
+    # إرسال ملخص الإحصائيات بعد التقرير
+    # -------------------
+    total_scanned = sum(len(msgs) for msgs in duplicate_groups.values()) + (total_scanned - sum(len(msgs) for msgs in duplicate_groups.values()))
+    summary_text = (
+        f"📌 القناة: {channel_id}\n"
+        f"⏱ الوقت المستغرق: {round(time.time() - start_time,2)} ثانية\n"
+        f"🔍 الرسائل المفحوصة: {total_scanned}\n"
+        f"📂 مجموعات التكرار: {len(duplicate_groups)}\n"
+        f"📑 الرسائل المكررة: {sum(len(msgs)-1 for msgs in duplicate_groups.values())}\n"
+        f"📦 أكبر ملف مكرر: {human_size(max_size)}\n"
+        f"📦 أصغر ملف مكرر: {human_size(min_size)}"
+    )
+    await bot_client.send_message(MY_CHAT_ID, summary_text)
 
     # إذا مطلوب حذف ونوجد عناصر للحذف
     if do_delete:
