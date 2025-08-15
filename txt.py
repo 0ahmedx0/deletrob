@@ -14,7 +14,7 @@ load_dotenv()
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-MY_CHAT_ID = int(os.getenv("MY_CHAT_ID"))
+MY_CHAT_ID = int(os.getenv("MY_CHAT_ID"))  # معرفك من @userinfobot
 
 # -------------------
 # جلسات المستخدم والبوت
@@ -147,36 +147,38 @@ async def handler(event):
     parts = text.split()
 
     if not parts:
-        await event.reply("❌ أرسل: <CHANNEL_ID> [FIRST_MSG_ID] [TYPE] أو delete")
+        await event.reply("❌ أرسل: /scan <CHANNEL_ID> [FIRST_MSG_ID] [TYPE] أو /scan_delete ...")
         return
 
-    if parts[0] == "/cancel":
+    cmd = parts[0]
+    if cmd == "/cancel":
         cancel_delete = True
         await event.reply("❌ تم إلغاء عملية الحذف.")
         return
 
-    if parts[0] == "/stats":
+    if cmd not in ["/scan", "/scan_delete", "/stats"]:
+        await event.reply("❌ أمر غير معروف.")
+        return
+
+    if cmd == "/stats":
         if last_report:
             await event.reply(file=last_report, message="📊 آخر تقرير:")
         else:
             await event.reply("❌ لا يوجد تقرير سابق.")
         return
 
-    # صيغة جديدة: CHANNEL_ID FIRST_MSG_ID TYPE أو delete
+    # scan / scan_delete
     try:
-        raw_id = parts[0]
-        channel_id = int(raw_id)
-        if channel_id > 0:
-            channel_id = -1000000000000 + channel_id  # إضافة -100 تلقائياً
-        first_msg_id = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 1
-        type_or_delete = parts[2] if len(parts) > 2 else "all"
-        do_delete = type_or_delete in ["delete", "del"]
-        file_type = type_or_delete if type_or_delete not in ["delete", "del"] else "all"
+        channel_id = int(parts[1])
+        first_msg_id = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 1
+        file_type = parts[3] if len(parts) > 3 else "all"
     except:
-        await event.reply("❌ صيغة غير صحيحة.\n📌 مثال: `1234567890 5 document` أو `1234567890 5 delete`")
+        await event.reply("❌ صيغة غير صحيحة.\n📌 مثال: `/scan -1001234567890 5 document`")
         return
 
+    do_delete = cmd == "/scan_delete"
     cancel_delete = False
+
     await bot_client.send_message(MY_CHAT_ID, f"🚀 بدء فحص القناة {channel_id} من الرسالة {first_msg_id} (نوع: {file_type})...")
     report, delete_ids, error = await scan_channel(channel_id, first_msg_id, file_type)
 
@@ -198,21 +200,18 @@ async def main():
     await user_client.start()
     await bot_client.start(bot_token=BOT_TOKEN)
 
-    # رسالة ترحيب مع قائمة الأوامر
+    # رسالة ترحيبية مع قائمة الأوامر عند التشغيل
     welcome_text = """🤖 مرحباً بك في بوت إدارة الملفات المكررة!
 
-📌 الصيغ المتاحة:
+📌 الأوامر المتاحة:
 
-1️⃣ <CHANNEL_ID> [FIRST_MSG_ID] [TYPE]
-   🔹 فحص فقط بدون حذف
-   🔹 مثال: 1234567890 5 document
+1️⃣ /scan <CHANNEL_ID> [FIRST_MSG_ID] [TYPE]
+   🔹 فحص القناة فقط بدون حذف الملفات
+   🔹 مثال: /scan -1001234567890 5 document
 
-2️⃣ <CHANNEL_ID> [FIRST_MSG_ID] delete
-   🔹 فحص وحذف الرسائل المكررة
-   🔹 مثال: 1234567890
-2️⃣ <CHANNEL_ID> [FIRST_MSG_ID] delete
-   🔹 فحص وحذف الرسائل المكررة
-   🔹 مثال: 1234567890 5 delete
+2️⃣ /scan_delete <CHANNEL_ID> [FIRST_MSG_ID] [TYPE]
+   🔹 فحص القناة وحذف الرسائل المكررة
+   🔹 مثال: /scan_delete -1001234567890 5 photo
 
 3️⃣ /stats
    🔹 عرض آخر تقرير تم إنشاؤه
@@ -227,14 +226,7 @@ async def main():
     await bot_client.send_message(MY_CHAT_ID, "[✓] البوت جاهز لاستقبال الأوامر.")
     await bot_client.send_message(MY_CHAT_ID, welcome_text)
 
-    await asyncio.Future()  # يبقى البوت شغال للأبد
+    await asyncio.Future()  # يبقى شغال للأبد
 
-# -------------------
-# نقطة الدخول
-# -------------------
 if __name__ == "__main__":
-    # تشغيل البوت مع جلسة المستخدم
-    try:
-        user_client.loop.run_until_complete(main())
-    except KeyboardInterrupt:
-        print("✅ تم إيقاف البوت يدوياً")
+    user_client.loop.run_until_complete(main())
