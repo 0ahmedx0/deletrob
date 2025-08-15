@@ -163,8 +163,22 @@ async def find_duplicates():
         logger.error(f"حدث خطأ أثناء إرسال إشعار الانتهاء: {e}")
 
 
-if __name__ == "__main__":
+# هذا هو الجزء الجديد والمُحسّن
+async def main():
+    """
+    الدالة الرئيسية التي تبدأ وتوقف العميل بشكل آمن.
+    """
     logger.info("بدء تشغيل سكربت البحث عن التكرارات...")
-    # استخدام asyncio.run لتشغيل الدالة غير المتزامنة
-    asyncio.run(find_duplicates())
-    logger.info("انتهى تنفيذ السكربت.")
+    try:
+        await app.start()
+        await find_duplicates()
+    except Exception as e:
+        logger.error(f"حدث خطأ غير متوقع في المستوى الأعلى: {e}")
+    finally:
+        if app.is_connected:
+            await app.stop()
+        logger.info("انتهى تنفيذ السكربت.")
+
+if __name__ == "__main__":
+    # استخدام asyncio.run لتشغيل الدالة الرئيسية غير المتزامنة
+    asyncio.run(main())
