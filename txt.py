@@ -166,13 +166,13 @@ async def backup_duplicates(channel_id, delete_ids, dest_channel_id):
 # -------------------
 # حذف بالدفعات مع تحديث تقدم
 # -------------------
-async def delete_messages_in_batches(channel_id, msg_ids, batch_size=100, delay=60):
+async def delete_messages_in_batches(channel_id, msg_ids, batch_size=100, delay=50):
     global cancel_delete
     total = len(msg_ids)
     deleted_count = 0
     start_time = time.time()
     progress_msg = await bot_client.send_message(MY_CHAT_ID, f"🗑 بدء حذف: 0/{total} رسالة (0%) ...")
-
+    await asyncio.sleep(10)
     for i in range(0, total, batch_size):
         if cancel_delete:
             await bot_client.edit_message(progress_msg, f"❌ تم إلغاء عملية الحذف. المحذوف حتى الآن: {deleted_count}/{total}")
@@ -309,7 +309,7 @@ async def handler(event):
         await bot_client.send_message(MY_CHAT_ID, f"💾 نسخ الملفات المكررة إلى قناة الوجهة قبل الحذف ...")
         await backup_duplicates(channel_id, delete_ids, DEST_CHANNEL_ID)
         await bot_client.send_message(MY_CHAT_ID, f"🗑 بدء الحذف بعد النسخ ...")
-        deleted, duration = await delete_messages_in_batches(channel_id, delete_ids, batch_size=100, delay=60)
+        deleted, duration = await delete_messages_in_batches(channel_id, delete_ids, batch_size=100, delay=50)
         await bot_client.send_message(MY_CHAT_ID, f"✅ انتهت عملية الحذف. المحذوف: {deleted} رسالة. المدة: {duration} ثانية.")
     elif do_delete:
         await bot_client.send_message(MY_CHAT_ID, "ℹ️ لا توجد ملفات مكررة للحذف.")
