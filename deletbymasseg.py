@@ -251,7 +251,7 @@ async def find_and_report_duplicates(client, channel_id):
 # ----------------- الدالة الرئيسية -----------------
 
 async def main():
-    async with Client(SESSION, api_id=API_ID, api_hash=API_HASH) as client:
+    async with Client("my_bot_session", api_id=API_ID, api_hash=API_HASH) as client:
         print("🚀 اتصال ناجح بالتيليجرام عبر Pyrogram.")
 
         print("💡 جارٍ التحقق من الوصول إلى القنوات...")
