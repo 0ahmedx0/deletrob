@@ -12,11 +12,11 @@ API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 MY_CHAT_ID = int(os.getenv("MY_CHAT_ID"))  # معرفك من @userinfobot
 
-# جلسة حساب المستخدم (للوصول للقنوات)
+# جلسة حساب المستخدم (للوصول الكامل للقنوات)
 user_client = TelegramClient('user_session', API_ID, API_HASH)
 
-# جلسة البوت (للأوامر والإشعارات)
-bot_client = TelegramClient('bot_session', API_ID, API_HASH).start(bot_token=BOT_TOKEN)
+# جلسة البوت (للاستقبال والتحكم)
+bot_client = TelegramClient('bot_session', API_ID, API_HASH)
 
 async def scan_channel(channel_id: int, first_msg_id: int = 1):
     """فحص القناة وإرجاع اسم التقرير وقائمة IDs المكررة"""
@@ -27,17 +27,15 @@ async def scan_channel(channel_id: int, first_msg_id: int = 1):
                 file_size = msg.file.size
                 duplicates.setdefault(file_size, []).append(msg)
     except FloodWaitError as e:
+        print(f"[!] انتظر {e.seconds} ثانية بسبب FloodWait")
         await asyncio.sleep(e.seconds)
     except Exception as e:
         return None, None, f"[!] خطأ أثناء الفحص: {e}"
 
-    # المكررات فقط (أكثر من رسالة بنفس الحجم)
     duplicate_groups = {size: msgs for size, msgs in duplicates.items() if len(msgs) > 1}
-
-    # تجهيز التقرير
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     report_name = f"duplicates_report_{timestamp}.txt"
-    delete_ids = []  # IDs المكررة التي ستحذف
+    delete_ids = []
 
     with open(report_name, "w", encoding="utf-8") as f:
         f.write("📄 تقرير الملفات المكررة في القناة\n")
@@ -67,15 +65,13 @@ async def delete_messages_in_batches(channel_id, msg_ids, batch_size=100, delay=
             await asyncio.sleep(e.seconds)
         except Exception as e:
             print(f"[!] خطأ في الحذف: {e}")
-        await asyncio.sleep(delay)  # الانتظار بين الدفعات
+        await asyncio.sleep(delay)
 
 @bot_client.on(events.NewMessage(from_users=MY_CHAT_ID))
 async def handler(event):
-    """استقبال الأوامر من صاحب البوت"""
-    text = event.raw_text.strip()
-    parts = text.split()
-
-    if len(parts) == 0:
+    """استقبال أوامر الفحص والحذف"""
+    parts = event.raw_text.strip().split()
+    if not parts:
         await event.reply("❌ أرسل: CHANNEL_ID [FIRST_MSG_ID] [delete]")
         return
 
@@ -101,14 +97,9 @@ async def handler(event):
 
 async def main():
     await user_client.start()
+    await bot_client.start()
     print("[✓] البوت جاهز لاستقبال الأوامر.")
-    await bot_client.run_until_disconnected()
+    await asyncio.Future()  # يبقى شغال للأبد
 
 if __name__ == "__main__":
-    async def runner():
-        await user_client.start()
-        await bot_client.start()
-        print("[✓] البوت جاهز لاستقبال الأوامر.")
-        await asyncio.Future()  # علشان يظل شغال للأبد
-
-    user_client.loop.run_until_complete(runner())
+    user_client.loop.run_until_complete(main())
