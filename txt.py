@@ -129,7 +129,8 @@ async def scan_channel(channel_id: int, first_msg_id: int = 1, file_type: str = 
                 f.write(f"   ↳ مكرر: https://t.me/c/{str(channel_id)[4:]}/{dup.id}\n")
                 delete_ids.append(dup.id)
             f.write("\n")
-    return report_name, delete_ids, duplicate_groups, None
+    return report_name, sorted(list(set(delete_ids))), duplicate_groups, None
+
 
 # -------------------
 # نسخ الوسائط المكررة إلى قناة الوجهة
@@ -142,7 +143,7 @@ async def backup_duplicates(channel_id, delete_ids, dest_channel_id):
         messages_to_send = []
         for msg_id in batch_ids:
             msg = await user_client.get_messages(channel_id, ids=msg_id)
-            if getattr(msg, "photo", None) or getattr(msg, "video", None):
+            if getattr(msg, "photo", None) or getattr(msg, "video", None) or getattr(msg, "audio", None) or getattr(msg, "document", None):
                 messages_to_send.append(msg)
         if messages_to_send:
             try:
@@ -164,7 +165,7 @@ async def delete_messages_in_batches(channel_id, msg_ids, batch_size=100, delay=
     await asyncio.sleep(10)
     for i in range(0, total, batch_size):
         if cancel_delete:
-            await bot_client.edit_message(progress_msg, f"❌ تم إلغاء عملية الحذف. المحذوف حتى الآن: {deleted_count}/{total}")
+            await bot_client.edit_message(progress_msg.chat_id, progress_msg.id, f"❌ تم إلغاء عملية الحذف. المحذوف حتى الآن: {deleted_count}/{total}")
             cancel_delete = False
             return deleted_count, round(time.time() - start_time, 2)
         batch = msg_ids[i:i+batch_size]
@@ -172,16 +173,16 @@ async def delete_messages_in_batches(channel_id, msg_ids, batch_size=100, delay=
             await user_client.delete_messages(channel_id, batch)
             deleted_count += len(batch)
             percent = math.floor((deleted_count / total) * 100)
-            await bot_client.edit_message(progress_msg,
+            await bot_client.edit_message(progress_msg.chat_id, progress_msg.id,
                                           f"🗑 حذف: {deleted_count}/{total} رسالة — {percent}%\nآخر دفعة: {len(batch)} رسالة.\n(انتظار {delay}s قبل الدفعة التالية)")
         except FloodWaitError as e:
-            await bot_client.edit_message(progress_msg, f"[!] FloodWait — انتظار {e.seconds} ثانية ...")
+            await bot_client.edit_message(progress_msg.chat_id, progress_msg.id, f"[!] FloodWait — انتظار {e.seconds} ثانية ...")
             await asyncio.sleep(e.seconds)
         except Exception as e:
-            await bot_client.edit_message(progress_msg, f"[!] خطأ أثناء الحذف: {repr(e)}")
+            await bot_client.edit_message(progress_msg.chat_id, progress_msg.id, f"[!] خطأ أثناء الحذف: {repr(e)}")
         await asyncio.sleep(delay)
     duration = round(time.time() - start_time, 2)
-    await bot_client.edit_message(progress_msg, f"✅ انتهى الحذف. المحذوف الكلي: {deleted_count}/{total} رسالة في {duration} ثانية.")
+    await bot_client.edit_message(progress_msg.chat_id, progress_msg.id, f"✅ انتهى الحذف. المحذوف الكلي: {deleted_count}/{total} رسالة في {duration} ثانية.")
     return deleted_count, duration
 
 # -------------------
@@ -260,9 +261,8 @@ async def proceed_with_backup_and_delete(job_context):
         await bot_client.send_message(MY_CHAT_ID, "ℹ️ تم الانتهاء من الفحص (لم يتم حذف أي رسالة).")
 
 # معالج استجابات الأزرار
-@bot_client.on(events.CallbackQuery) # <-- تم تصحيح هذا السطر
+@bot_client.on(events.CallbackQuery)
 async def callback_handler(event):
-    # <-- تمت إضافة هذا التحقق
     if event.sender_id != MY_CHAT_ID:
         await event.answer("🚫 أنت غير مصرح لك باستخدام هذا الزر.", alert=True)
         return
@@ -275,14 +275,29 @@ async def callback_handler(event):
     job = scan_jobs.get(report_key)
     if not job:
         await event.answer("⚠️ هذه المهمة قديمة أو منتهية.", alert=True)
-        await event.edit("هذه الأزرار لم تعد صالحة.")
+        # *** بداية التصحيح ***
+        # الحصول على الرسالة الأصلية وتعديلها لإزالة الأزرار
+        try:
+            await event.edit("هذه الأزرار لم تعد صالحة.")
+        except Exception:
+            pass # تجاهل الخطأ إذا لم يتمكن من تعديل الرسالة القديمة
+        # *** نهاية التصحيح ***
         return
-    await event.edit(event.message.text, buttons=None)
+
+    # *** بداية التصحيح ***
+    # الحصول على الرسالة التي تحتوي على الأزرار
+    original_message = await event.get_message()
+    if original_message:
+        # تعديل الرسالة لإزالة الأزرار، مع الإبقاء على النص الأصلي
+        await original_message.edit(original_message.text, buttons=None)
+    # *** نهاية التصحيح ***
+    
     if action == "send_report_yes":
         await bot_client.send_message(MY_CHAT_ID, "⏳ تم اختيار 'نعم'. جاري إرسال التقرير النصي...")
         await send_report_as_text(report_key, DEST_CHANNEL_ID)
     elif action == "send_report_no":
         await bot_client.send_message(MY_CHAT_ID, "👍 تم اختيار 'لا'. لن يتم إرسال التقرير النصي.")
+        
     await proceed_with_backup_and_delete(job)
     if report_key in scan_jobs:
         del scan_jobs[report_key]
@@ -358,22 +373,12 @@ async def handler(event):
     last_report = report
     await bot_client.send_file(MY_CHAT_ID, report, caption="✅ تم الانتهاء من الفحص — تقرير مفصل:")
     
-    # لا توجد طريقة موثوقة لحساب وقت المعالجة هنا، لذلك تم حذف السطر
-    total_scanned = 0
-    if duplicate_groups:
-        # هذه الطريقة ليست دقيقة تماماً ولكنها أفضل تقدير
-        all_msgs = [msg for msgs_list in duplicate_groups.values() for msg in msgs_list]
-        total_scanned = (max(msg.id for msg in all_msgs) if all_msgs else first_msg) - first_msg + 1
-        
-    summary_text = (
-        f"📌 القناة: {channel_id}\n"
-        f"🔍 الرسائل المفحوصة (تقديريًا): {total_scanned}\n"
-        f"📂 مجموعات التكرار: {len(duplicate_groups)}\n"
-        f"📑 الرسائل المكررة: {sum(len(msgs)-1 for msgs in duplicate_groups.values())}\n"
-        f"📦 أكبر ملف مكرر: {human_size(max(duplicate_groups) if duplicate_groups else 0)}\n"
-        f"📦 أصغر ملف مكرر: {human_size(min(duplicate_groups) if duplicate_groups else 0)}"
-    )
-    await bot_client.send_message(MY_CHAT_ID, summary_text)
+    with open(report, "r", encoding="utf-8") as f:
+        report_content = f.read()
+    summary_lines = report_content.splitlines()[2:9]
+    summary_text = "\n".join(summary_lines)
+
+    await bot_client.send_message(MY_CHAT_ID, "📊 ملخص التقرير:\n" + summary_text)
     
     if delete_ids:
         scan_jobs[report] = {
