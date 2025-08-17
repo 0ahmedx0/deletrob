@@ -11,7 +11,7 @@ from datetime import datetime
 from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError
 from telethon.tl.types import InputMediaDocument
-from telethon.tl.custom import Button  # <-- تمت إضافة هذا السطر
+from telethon.tl.custom import Button
 from dotenv import load_dotenv
 
 # -------------------
@@ -38,7 +38,7 @@ bot_client = TelegramClient('bot_session', API_ID, API_HASH)
 # -------------------
 cancel_delete = False
 last_report = None
-scan_jobs = {} # <-- تمت إضافة هذا السطر لتخزين حالة المهام
+scan_jobs = {}
 
 # -------------------
 # دوال مساعدة
@@ -97,9 +97,7 @@ async def scan_channel(channel_id: int, first_msg_id: int = 1, file_type: str = 
     except Exception as e:
         return None, None, None, f"[!] خطأ أثناء الفحص: {repr(e)}"
 
-    # تصفية مجموعات التكرار
     duplicate_groups = {size: msgs for size, msgs in duplicates.items() if len(msgs) > 1}
-
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     report_name = f"duplicates_report_{timestamp}.txt"
     delete_ids = []
@@ -123,46 +121,35 @@ async def scan_channel(channel_id: int, first_msg_id: int = 1, file_type: str = 
         f.write(f"📦 أكبر ملف مكرر: {human_size(max_size)}\n")
         f.write(f"📦 أصغر ملف مكرر: {human_size(min_size)}\n")
         f.write("="*60 + "\n\n")
-
         for size, msgs in sorted(duplicate_groups.items(), key=lambda x:x[0], reverse=True):
             f.write(f"📦 الحجم: {human_size(size)} ({size} B)\n")
-            # msgs مرتبة من الأحدث للأقدم، نحتفظ بالأقدم (آخر رسالة)
             original = msgs[-1]
             f.write(f"🔗 الأصل: https://t.me/c/{str(channel_id)[4:]}/{original.id}\n")
-            for dup in msgs[:-1]:  # حذف الأحدث
+            for dup in msgs[:-1]:
                 f.write(f"   ↳ مكرر: https://t.me/c/{str(channel_id)[4:]}/{dup.id}\n")
                 delete_ids.append(dup.id)
             f.write("\n")
-
     return report_name, delete_ids, duplicate_groups, None
 
 # -------------------
-# نسخ الوسائط المكررة إلى قناة الوجهة (ألبومات من 10 صور/فيديو/صوتية فقط)
-# -------------------
-# -------------------
-# نسخ الوسائط المكررة إلى قناة الوجهة (ألبومات من 10 صور/فيديو/صوتية فقط، حسب ترتيب الرسائل)
+# نسخ الوسائط المكررة إلى قناة الوجهة
 # -------------------
 async def backup_duplicates(channel_id, delete_ids, dest_channel_id):
     batch_size = 10
-    # ترتيب الرسائل حسب ID تصاعدياً
     sorted_ids = sorted(delete_ids)
-
     for i in range(0, len(sorted_ids), batch_size):
         batch_ids = sorted_ids[i:i+batch_size]
         messages_to_send = []
         for msg_id in batch_ids:
             msg = await user_client.get_messages(channel_id, ids=msg_id)
-            # إضافة فقط الصور والفيديو والصوتيات
             if getattr(msg, "photo", None) or getattr(msg, "video", None):
                 messages_to_send.append(msg)
         if messages_to_send:
             try:
-                # إرسال الألبوم بالكامل دفعة واحدة
                 await user_client.send_file(dest_channel_id, messages_to_send, silent=True)
                 print(f"📦 تم إرسال ألبوم {i//batch_size + 1} يحتوي على {len(messages_to_send)} ملف/صورة/فيديو/صوتية")
             except Exception as e:
                 print(f"[!] خطأ أثناء النسخ الاحتياطي: {repr(e)}")
-        # تأخير 10 ثوانٍ قبل الألبوم التالي
         await asyncio.sleep(10)
 
 # -------------------
@@ -193,7 +180,6 @@ async def delete_messages_in_batches(channel_id, msg_ids, batch_size=100, delay=
         except Exception as e:
             await bot_client.edit_message(progress_msg, f"[!] خطأ أثناء الحذف: {repr(e)}")
         await asyncio.sleep(delay)
-
     duration = round(time.time() - start_time, 2)
     await bot_client.edit_message(progress_msg, f"✅ انتهى الحذف. المحذوف الكلي: {deleted_count}/{total} رسالة في {duration} ثانية.")
     return deleted_count, duration
@@ -224,8 +210,6 @@ async def send_welcome(target_id):
 # ----------------------------------------------------
 # *** بداية الكود الجديد ***
 # ----------------------------------------------------
-
-# دالة لإرسال التقرير كنص مجزأ ومرقم
 async def send_report_as_text(report_filename, dest_channel_id):
     try:
         with open(report_filename, "r", encoding="utf-8") as f:
@@ -233,12 +217,9 @@ async def send_report_as_text(report_filename, dest_channel_id):
     except FileNotFoundError:
         await bot_client.send_message(MY_CHAT_ID, f"❌ خطأ: لم يتم العثور على ملف التقرير {report_filename}")
         return
-
     parts = content.split("="*60 + "\n\n", 1)
     header = parts[0] + "="*60 + "\n\n"
     body = parts[1] if len(parts) > 1 else ""
-    
-    # ترقيم مجموعات التكرار
     duplicate_blocks = body.split("\n\n")
     numbered_blocks = []
     counter = 1
@@ -247,34 +228,26 @@ async def send_report_as_text(report_filename, dest_channel_id):
             numbered_block = f"{counter}) {block.strip()}"
             numbered_blocks.append(numbered_block)
             counter += 1
-
-    # إرسال الرأس أولاً
     await bot_client.send_message(dest_channel_id, header)
     await asyncio.sleep(5)
-
-    # تجميع وإرسال الجسم في أجزاء ذكية
     current_message = ""
     for block in numbered_blocks:
-        if len(current_message) + len(block) + 2 > 4096: # +2 for \n\n
+        if len(current_message) + len(block) + 2 > 4096:
             if current_message:
                 await bot_client.send_message(dest_channel_id, current_message)
                 await asyncio.sleep(5)
             current_message = block
         else:
             current_message += ("\n\n" + block) if current_message else block
-    
     if current_message:
         await bot_client.send_message(dest_channel_id, current_message)
         await asyncio.sleep(5)
-    
     await bot_client.send_message(MY_CHAT_ID, f"✅ تم إرسال التقرير النصي بنجاح إلى القناة `{dest_channel_id}`.")
 
-# دالة لمتابعة عملية النسخ والحذف بعد استجابة المستخدم
 async def proceed_with_backup_and_delete(job_context):
     channel_id = job_context['channel_id']
     delete_ids = job_context['delete_ids']
     do_delete = job_context['do_delete']
-
     if do_delete and delete_ids:
         await bot_client.send_message(MY_CHAT_ID, f"💾 نسخ الملفات المكررة إلى قناة الوجهة قبل الحذف ...")
         await backup_duplicates(channel_id, delete_ids, DEST_CHANNEL_ID)
@@ -287,38 +260,33 @@ async def proceed_with_backup_and_delete(job_context):
         await bot_client.send_message(MY_CHAT_ID, "ℹ️ تم الانتهاء من الفحص (لم يتم حذف أي رسالة).")
 
 # معالج استجابات الأزرار
-@bot_client.on(events.CallbackQuery(from_users=MY_CHAT_ID))
+@bot_client.on(events.CallbackQuery) # <-- تم تصحيح هذا السطر
 async def callback_handler(event):
+    # <-- تمت إضافة هذا التحقق
+    if event.sender_id != MY_CHAT_ID:
+        await event.answer("🚫 أنت غير مصرح لك باستخدام هذا الزر.", alert=True)
+        return
+
     data_str = event.data.decode('utf-8')
     try:
         action, report_key = data_str.split(":", 1)
     except ValueError:
         return
-
     job = scan_jobs.get(report_key)
     if not job:
         await event.answer("⚠️ هذه المهمة قديمة أو منتهية.", alert=True)
         await event.edit("هذه الأزرار لم تعد صالحة.")
         return
-
-    # إزالة الأزرار بعد الاختيار
     await event.edit(event.message.text, buttons=None)
-
     if action == "send_report_yes":
         await bot_client.send_message(MY_CHAT_ID, "⏳ تم اختيار 'نعم'. جاري إرسال التقرير النصي...")
         await send_report_as_text(report_key, DEST_CHANNEL_ID)
     elif action == "send_report_no":
         await bot_client.send_message(MY_CHAT_ID, "👍 تم اختيار 'لا'. لن يتم إرسال التقرير النصي.")
-
-    # المتابعة إلى النسخ والحذف في كلتا الحالتين
     await proceed_with_backup_and_delete(job)
-    
-    # تنظيف المهمة بعد الانتهاء
     if report_key in scan_jobs:
         del scan_jobs[report_key]
-    
     await event.answer()
-
 # ----------------------------------------------------
 # *** نهاية الكود الجديد ***
 # ----------------------------------------------------
@@ -337,7 +305,6 @@ async def handler(event):
     text = raw_text.strip()
     lower = text.lower().strip()
     parts = lower.split()
-    # دعم أوامر /slash
     if parts[0].startswith("/"):
         cmd = parts[0]
         if cmd == "/cancel":
@@ -353,7 +320,6 @@ async def handler(event):
         if cmd in ("/help", "/start"):
             await send_welcome(event.sender_id)
             return
-        # /scan or /scan_delete parsing
         try:
             channel_raw = parts[1]
             channel_id = normalize_channel_id(channel_raw)
@@ -364,7 +330,6 @@ async def handler(event):
             return
         do_delete = (cmd == "/scan_delete")
     else:
-        # صيغة المدخل الحر: "1234567890 5 delete"
         try:
             channel_raw = parts[0]
             channel_id = normalize_channel_id(channel_raw)
@@ -384,9 +349,7 @@ async def handler(event):
             await event.reply("❌ صيغة غير صحيحة. مثال: `1234567890 5 delete`")
             return
 
-    # إبلاغ المستخدم بالبدء
     await bot_client.send_message(MY_CHAT_ID, f"🚀 بدء فحص القناة `{channel_id}` من الرسالة `{first_msg}` (نوع: `{file_type}`) — حذف: {do_delete}")
-
     report, delete_ids, duplicate_groups, error = await scan_channel(channel_id, first_msg, file_type)
     if error:
         await bot_client.send_message(MY_CHAT_ID, error)
@@ -394,22 +357,24 @@ async def handler(event):
 
     last_report = report
     await bot_client.send_file(MY_CHAT_ID, report, caption="✅ تم الانتهاء من الفحص — تقرير مفصل:")
-
-    # إرسال ملخص الإحصائيات بعد التقرير
-    total_scanned = sum(len(msgs) for msgs in duplicate_groups.values()) + (first_msg-1)
+    
+    # لا توجد طريقة موثوقة لحساب وقت المعالجة هنا، لذلك تم حذف السطر
+    total_scanned = 0
+    if duplicate_groups:
+        # هذه الطريقة ليست دقيقة تماماً ولكنها أفضل تقدير
+        all_msgs = [msg for msgs_list in duplicate_groups.values() for msg in msgs_list]
+        total_scanned = (max(msg.id for msg in all_msgs) if all_msgs else first_msg) - first_msg + 1
+        
     summary_text = (
         f"📌 القناة: {channel_id}\n"
-        f"⏱ الوقت المستغرق: {round(time.time() - time.time(),2)} ثانية\n"
-        f"🔍 الرسائل المفحوصة: {total_scanned}\n"
+        f"🔍 الرسائل المفحوصة (تقديريًا): {total_scanned}\n"
         f"📂 مجموعات التكرار: {len(duplicate_groups)}\n"
         f"📑 الرسائل المكررة: {sum(len(msgs)-1 for msgs in duplicate_groups.values())}\n"
         f"📦 أكبر ملف مكرر: {human_size(max(duplicate_groups) if duplicate_groups else 0)}\n"
         f"📦 أصغر ملف مكرر: {human_size(min(duplicate_groups) if duplicate_groups else 0)}"
     )
     await bot_client.send_message(MY_CHAT_ID, summary_text)
-
-    # *** تم تعديل هذا الجزء ***
-    # إذا وجدت تكرارات، اسأل المستخدم قبل المتابعة
+    
     if delete_ids:
         scan_jobs[report] = {
             'channel_id': channel_id,
@@ -428,7 +393,6 @@ async def handler(event):
             buttons=buttons
         )
     else:
-        # إذا لم توجد تكرارات، أنهِ العملية مباشرة
         if do_delete:
             await bot_client.send_message(MY_CHAT_ID, "ℹ️ لا توجد ملفات مكررة للحذف.")
         else:
